@@ -1,0 +1,36 @@
+
+----------------------------------------------------------------------------------------------------------------------------- /opt/cray/pe/lmod/lmod/modulefiles/Core -----------------------------------------------------------------------------------------------------------------------------
+   lmod    settarg
+
+------------------------------------------------------------------------------------------------------------------------------- /opt/cray/pe/lmod/modulefiles/core --------------------------------------------------------------------------------------------------------------------------------
+   PrgEnv-cray/8.5.0          atp/3.15.4            cpe-cuda/25.03  (D)    cray-ccdb/5.0.6  (D)    cray-dyninst/12.3.2            cray-mrnet/5.1.5   (D)    cray-zmqnet/1.3.0         cuda/11.8              (D)    gcc-native/13.2        papi/7.1.0.2                  sanitizers4hpc/1.1.5 (D)
+   PrgEnv-cray/8.6.0   (D)    atp/3.15.6     (D)    cpe/24.07              cray-cti/2.18.4         cray-dyninst/12.3.5     (D)    cray-pmi/6.1.15           craype/2.7.32             cuda/12.6              ([1;33mL[0m)    gcc-native/14.2 (D)    papi/7.2.0.1           (D)    valgrind4hpc/2.13.3
+   PrgEnv-gnu/8.5.0           cce/18.0.0            cpe/25.03       (D)    cray-cti/2.19.1  (D)    cray-libsci_acc/24.07.0        cray-python/3.11.7        craype/2.7.34      (D)    cudatoolkit/24.11_11.8        gdb4hpc/4.16.2         perftools-base/24.07.0        valgrind4hpc/2.13.5  (D)
+   PrgEnv-gnu/8.6.0    (D)    cce/19.0.0     (D)    cray-R/4.4.0           cray-dsmml/0.3.0        cray-libsci_acc/25.03.0 (D)    cray-stat/4.12.3          craypkg-gen/1.3.33        cudatoolkit/24.11_12.6 (D)    gdb4hpc/4.16.4  (D)    perftools-base/25.03.0 (D)
+   PrgEnv-nvidia/8.6.0        cpe-cuda/24.07        cray-ccdb/5.0.4        cray-dsmml/0.3.1 (D)    cray-mrnet/5.1.3               cray-stat/4.12.5   (D)    craypkg-gen/1.3.35 (D)    gcc-native/12.3               nvidia/24.11           sanitizers4hpc/1.1.3
+
+---------------------------------------------------------------------------------------------------------------------- /opt/cray/pe/lmod/modulefiles/craype-targets/default -----------------------------------------------------------------------------------------------------------------------
+   craype-accel-amd-gfx908    craype-accel-amd-gfx942    craype-accel-nvidia80    craype-hugepages128M    craype-hugepages256M    craype-hugepages32M     craype-hugepages64M    craype-network-ofi    craype-x86-milan-x    craype-x86-spr-hbm    craype-x86-turin
+   craype-accel-amd-gfx90a    craype-accel-host          craype-accel-nvidia90    craype-hugepages16M     craype-hugepages2G      craype-hugepages4M      craype-hugepages8M     craype-network-ucx    craype-x86-milan      craype-x86-spr
+   craype-accel-amd-gfx940    craype-accel-nvidia70      craype-arm-grace         craype-hugepages1G      craype-hugepages2M      craype-hugepages512M    craype-network-none    craype-x86-genoa      craype-x86-rome       craype-x86-trento
+
+------------------------------------------------------------------------------------------------------------------------------------ /tools/brics/modulefiles -------------------------------------------------------------------------------------------------------------------------------------
+   brics/apptainer-multi-node/0.3.1        brics/aws-ofi-nccl/1.6.0        brics/default/1.0 ([1;33mL[0m)    brics/nano/8.2             brics/nccl/2.21.5-1        brics/openmpi/4.1.7               brics/tmux/3.4       brics/userenv/2.6
+   brics/apptainer-multi-node/0.3.2 (D)    brics/aws-ofi-nccl/1.8.1 (D)    brics/emacs/29.4         brics/nccl-tests/2.13.6    brics/nccl/2.26.6-1 (D)    brics/osu-micro-benchmarks/7.5    brics/userenv/2.5    brics/userenv/2.7 ([1;33mL[0m,D)
+
+-------------------------------------------------------------------------------------------------------------------------------------- /opt/cray/modulefiles --------------------------------------------------------------------------------------------------------------------------------------
+   cudatoolkit/24.11_11.8    cudatoolkit/24.11_12.6    libfabric/1.22.0    nvhpc-byo-compiler/24.11    nvhpc-hpcx-cuda11/24.11    nvhpc-hpcx-cuda12/24.11    nvhpc-hpcx/24.11    nvhpc-nompi/24.11    nvhpc/24.11    xpmem/2.11.5-1.3_g73ade43320bc
+
+  Where:
+   [1;33mL[0m:  Module is loaded
+   D:  Default Module
+
+If the avail list is too long consider trying:
+
+"module --default avail" or "ml -d av" to just list the default modules.
+"module overview" or "ml ov" to display the number of modules for each name.
+
+Use "module spider" to find all possible modules and extensions.
+Use "module keyword key1 key2 ..." to search for all possible modules matching any of the "keys".
+
+

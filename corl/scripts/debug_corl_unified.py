@@ -10,10 +10,6 @@ Equivalent to the torchrun command but single-process for easier debugging.
 import os
 import sys
 
-# Set environment before any other imports
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Single GPU for debugging
-os.environ["CUDA_HOME"] = "/vol/research/fmodel_medical/people/umar/miniconda3/envs/corl"
-
 
 
 import torch
@@ -33,7 +29,7 @@ from corl.open_r1.grpo_janus_unify import GRPOScriptArguments, main
 if __name__ == "__main__":
     # ---- Paths (edit these) ---- #
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
-    DATA_PATH = "/work/um00109/MLLM/datasets/VL-Health/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
+    DATA_PATH = "/projects/u6gd/umar/codes/ULM-R1/data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
     SAVE_DIR = "./JanusPro-1B-CoRL-Uniified"
     SAVE_PATH = f"{SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16"
 
@@ -42,7 +38,7 @@ if __name__ == "__main__":
     # ---- Script arguments ---- #
     script_args = GRPOScriptArguments(
         dataset_name=DATA_PATH,
-        image_base_dir="/work/um00109/MLLM/datasets/PubMedVision/images",
+        image_base_dir="/projects/u6gd/datasets/PubMedVision/images",
         reward_funcs=["t2i_bid_cycle_reward", "t2i_ti_sim", "qa_accuracy", "format"],
         task_format="unify",
         unify_advantage=False,
