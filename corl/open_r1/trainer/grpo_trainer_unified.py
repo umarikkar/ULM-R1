@@ -218,7 +218,8 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         # tokens of the input, floating-point operations will not be computed." To suppress this
         # warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to
         # True. This acts as a flag to indicate that the warning has already been issued.
-        model.warnings_issued["estimate_tokens"] = True
+
+        # model.warnings_issued["estimate_tokens"] = True
 
         super().__init__(
             model=model,
@@ -390,7 +391,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
 
     def wrap_mm2t_prompt(self, inputs, device):
         prompts = [x["qa_prompt"] for x in inputs]
-        images = [[x["real_image"]] for x in inputs]  # PIL.Image
+        images = [[x["image"]] for x in inputs]  # PIL.Image
 
         prompt_inputs = self.processing_class(
             conversations=prompts, images=images, force_batchify=True,
@@ -534,7 +535,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             if "t2i_CycleConsistency" in reward_func.__name__:
                 reward_kwargs = {
                     key: [example[key] for example in inputs for _ in range(self.num_generations)]
-                    for key in inputs[0].keys() if key in ["real_image"]
+                    for key in inputs[0].keys() if key in ["image"]
                 }
                 # [bs * parallel_size, 3, 384, 384]
                 output_reward_func = reward_func(

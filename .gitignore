@@ -123,9 +123,15 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 
 # data
 *.parquet
+data/
 
 
 # local logs
 logs
 log
 outputs
+
+# large local artifacts
+checkpoint/
+cycle_check_medical/
+TEST_INPUT.txt

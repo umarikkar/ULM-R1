@@ -13,6 +13,7 @@ class BertScoreWrapper:
         self.device = device
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_ckpt)
+
         # self.model = AutoModel.from_pretrained(model_ckpt)
         config = AutoConfig.from_pretrained(model_ckpt)
         self.model = MPNetModel(config)

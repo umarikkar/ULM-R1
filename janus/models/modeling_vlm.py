@@ -16,6 +16,7 @@
 # COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+from dataclasses import field
 from typing import List, Optional, Tuple, Union, Callable
 import numpy as np
 from PIL import Image
@@ -79,7 +80,7 @@ def model_name_to_cls(cls_name):
 class VisionConfig(PretrainedConfig):
     model_type = "vision"
     cls: str = ""
-    params: AttrDict = {}
+    params: AttrDict = field(default_factory=AttrDict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -94,7 +95,7 @@ class VisionConfig(PretrainedConfig):
 class AlignerConfig(PretrainedConfig):
     model_type = "aligner"
     cls: str = ""
-    params: AttrDict = {}
+    params: AttrDict = field(default_factory=AttrDict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -109,7 +110,7 @@ class AlignerConfig(PretrainedConfig):
 class GenVisionConfig(PretrainedConfig):
     model_type = "gen_vision"
     cls: str = ""
-    params: AttrDict = {}
+    params: AttrDict = field(default_factory=AttrDict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -124,7 +125,7 @@ class GenVisionConfig(PretrainedConfig):
 class GenAlignerConfig(PretrainedConfig):
     model_type = "gen_aligner"
     cls: str = ""
-    params: AttrDict = {}
+    params: AttrDict = field(default_factory=AttrDict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -139,7 +140,7 @@ class GenAlignerConfig(PretrainedConfig):
 class GenHeadConfig(PretrainedConfig):
     model_type = "gen_head"
     cls: str = ""
-    params: AttrDict = {}
+    params: AttrDict = field(default_factory=AttrDict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -153,14 +154,14 @@ class GenHeadConfig(PretrainedConfig):
 
 class MultiModalityConfig(PretrainedConfig):
     model_type = "multi_modality"
-    vision_config: VisionConfig
-    aligner_config: AlignerConfig
+    vision_config: VisionConfig = None
+    aligner_config: AlignerConfig = None
 
-    gen_vision_config: GenVisionConfig
-    gen_aligner_config: GenAlignerConfig
-    gen_head_config: GenHeadConfig
+    gen_vision_config: GenVisionConfig = None
+    gen_aligner_config: GenAlignerConfig = None
+    gen_head_config: GenHeadConfig = None
 
-    language_config: LlamaConfig
+    language_config: LlamaConfig = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -193,6 +194,7 @@ class MultiModalityPreTrainedModel(PreTrainedModel):
     base_model_prefix = "multi_modality"
     _no_split_modules = []
     _skip_keys_device_placement = "past_key_values"
+    _tied_weights_keys = []
 
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
@@ -225,6 +227,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
 
         language_config = config.language_config
         self.language_model = LlamaForCausalLM(language_config)
+
+        self.post_init()
 
     def prepare_inputs_embeds(
             self,

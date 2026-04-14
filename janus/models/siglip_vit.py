@@ -388,7 +388,7 @@ class VisionTransformer(nn.Module):
         self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
         dpr = [
-            x.item() for x in torch.linspace(0, drop_path_rate, depth)
+            x.item() for x in torch.linspace(0, drop_path_rate, depth, device="cpu")
         ]  # stochastic depth decay rule
         self.blocks = nn.Sequential(
             *[

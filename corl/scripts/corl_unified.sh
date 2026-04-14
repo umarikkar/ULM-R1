@@ -1,5 +1,7 @@
 #!/bin/bash
 
+CUDA_VISIBLE_DEVICES=1,2,3,4
+
 # *****************  ***************** #
 CKPT_PATH=path/to/checkpoint/Janus-Pro-1B
 DATA_PATH=path/to/data/x2x_rft_22k
@@ -19,16 +21,16 @@ num_train_epochs=1
 max_prompt_length=1024
 max_completion_length=576
 
-num_generation=8
+num_generation=4
 gradient_accumulation_steps=4
 per_device_train_batch_size=1
 
-SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G8-beta004-bs16
+SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16
 mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 
 # --deepspeed scripts/zero3.json
-torchrun --nproc_per_node="8" \
+torchrun --nproc_per_node="4" \
     --nnodes="1" \
     --node_rank="0" \
     --master_addr="127.0.0.1" \

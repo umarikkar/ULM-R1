@@ -159,7 +159,7 @@ class T2ICycleConsistencyReward:
         cap_cs_scores = self.compute_caption_consistency(gen_captions, prompts)
 
         if self.using_img_cs:
-            img_cs_scores = self.compute_image_consistency(completions, kwargs['real_image'], device)
+            img_cs_scores = self.compute_image_consistency(completions, kwargs['image'], device)
 
             rewards = [a + b for a, b in zip(cap_cs_scores, img_cs_scores)]
         else:
@@ -268,15 +268,15 @@ def t2i_match_reward(
 
 @torch.inference_mode()
 def t2i_pixel_mse_reward(
-        completions, real_image,
+        completions, image,
         processing_class=None,
         **kwargs
 ):
     gen_images = processing_class.image_processor(completions, return_tensors="pt").pixel_values
-    real_image = processing_class.image_processor(real_image, return_tensors="pt").pixel_values
+    image = processing_class.image_processor(image, return_tensors="pt").pixel_values
 
     rewards = []
-    for gen_img, real_img in zip(gen_images, real_image):
+    for gen_img, real_img in zip(gen_images, image):
         reward = 1. - metric_F.image.root_mean_squared_error_using_sliding_window(
             gen_img[None], real_img[None]
         )  # near to 1, the better
