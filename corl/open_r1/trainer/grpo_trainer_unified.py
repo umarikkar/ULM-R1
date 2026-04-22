@@ -102,7 +102,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             optimizers: tuple[
                 Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]
             ] = (None, None),
-            attn_implementation: str = "flash_attention_2",
+            attn_implementation: str = "sdpa",
             peft_config: Optional["PeftConfig"] = None,
             task_args: ScriptArguments = None,
     ):

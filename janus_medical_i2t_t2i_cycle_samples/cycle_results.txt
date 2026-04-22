@@ -1,0 +1,80 @@
+[00] 0 (647x430) 109.3s | VQ_PSNR=24.82dB best_token_match=0.8837
+  Q: Describe the main content of the image.
+  Generated caption: The image is a cross-sectional scan of the abdomen, likely from a CT scan. It shows the internal structures of the abdomen, including the spine, pelvic bones, and organs. The scan is marked with lines indicating specific measurements, with "Length 4.87 cm" and "Length 5.33 cm" marked on the right side of the image. These measurements likely refer to the lengths of certain anatomical features or structures within the abdomen.
+  (dataset caption preview: The image shows a computed tomography (CT) angiography scan, specifically an axial view of the patient's abdomen. The image reveals an inferior mesenteric arter)
+  VQ reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/vq_recon/00_0.png
+  Best text reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/best_text_recon/00_0.png
+  Recovered prompt: A chest X-ray.
+  Recovered prompt source: generic_xray
+  Recovered prompt score: 0.883712
+  Top candidate: generic_xray=0.8837: A chest X-ray.
+  Top candidate: generic_medical=0.8778: A medical image.
+  Top candidate: generic_mri=0.8767: An MRI of the brain.
+  VQ metrics: {'mse': np.float64(214.13353587962962), 'l1': np.float64(6.857028537326389), 'psnr': np.float64(24.82395672522908)}
+  Best metrics: {'mse': np.float64(5694.5985423900465), 'l1': np.float64(52.237119321469905), 'psnr': np.float64(10.576172482509063)}
+  Panel: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/panels/00_0_panel.png
+
+[01] 63063 (706x484) 105.7s | VQ_PSNR=21.86dB best_token_match=0.8570
+  Q: Describe the main content of the image.
+  Generated caption: The image consists of four panels, each showing histological sections of tissue. The panels are labeled A, B, C, and D. Panel A shows a section with pink and purple staining, likely representing different tissue types. Panel B has a black arrow pointing to a structure that appears to be a gland or a similar feature. Panel C has a red arrow indicating a specific area within the tissue. Panel D shows a section with a similar pink and purple staining pattern, but with a different arrangement of structures. The image appears to be a comparative analysis of different tissue sections.
+  (dataset caption preview: The provided medical image consists of four distinct histopathological slides labeled A, B, C, and D. Slide A features a heterogeneous tissue sample with areas )
+  VQ reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/vq_recon/01_63063.png
+  Best text reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/best_text_recon/01_63063.png
+  Recovered prompt: A histology slide.
+  Recovered prompt source: generic_histology
+  Recovered prompt score: 0.856983
+  Top candidate: generic_histology=0.8570: A histology slide.
+  Top candidate: generated_caption=0.8502: The image consists of four panels, each showing histological sections of tissue. The panels are labeled A, B, C, and D. Panel A shows a section with pink and purple staining, likely representing different tissue types. Panel B has a black arrow pointing to a structure that appears to be a gland or a similar feature. Panel C has a red arrow indicating a specific area within the tissue. Panel D shows a section with a similar pink and purple staining pattern, but with a different arrangement of structures. The image appears to be a comparative analysis of different tissue sections.
+  Top candidate: generic_ct=0.8453: A CT scan of the abdomen.
+  VQ metrics: {'mse': np.float64(423.59960711443864), 'l1': np.float64(14.147874620225695), 'psnr': np.float64(21.86124812237256)}
+  Best metrics: {'mse': np.float64(5573.439193160446), 'l1': np.float64(60.261562771267364), 'psnr': np.float64(10.669570935786856)}
+  Panel: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/panels/01_63063_panel.png
+
+[02] 126126 (702x600) 104.4s | VQ_PSNR=25.81dB best_token_match=0.8659
+  Q: Describe the main content of the image.
+  Generated caption: The image shows a close-up view of a person's mouth, focusing on the teeth and surrounding tissues. The teeth appear to be in good condition, with no visible cavities or significant wear. The image also shows the tongue, which is relatively smooth and free of visible lesions or abnormalities. The overall appearance suggests a healthy oral environment.
+  (dataset caption preview: The image is an intraoral photograph showing a detailed view of the upper jaw and teeth. Notably, there is a cleft palate visible as a separation or gap in the )
+  VQ reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/vq_recon/02_126126.png
+  Best text reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/best_text_recon/02_126126.png
+  Recovered prompt: A histology slide.
+  Recovered prompt source: generic_histology
+  Recovered prompt score: 0.865908
+  Top candidate: generic_histology=0.8659: A histology slide.
+  Top candidate: generated_caption=0.8613: The image shows a close-up view of a person's mouth, focusing on the teeth and surrounding tissues. The teeth appear to be in good condition, with no visible cavities or significant wear. The image also shows the tongue, which is relatively smooth and free of visible lesions or abnormalities. The overall appearance suggests a healthy oral environment.
+  Top candidate: ground_truth_caption=0.8594: The image is an intraoral photograph showing a detailed view of the upper jaw and teeth. Notably, there is a cleft palate visible as a separation or gap in the middle of the roof of the mouth. The maxillary arch appears constricted, leading to a horseshoe-like curvature rather than a wide arc. There is visible crowding of the teeth, particularly evident in the misalignment and irregular spacing. Some teeth show signs of dental caries, noticeable by lighter and darker patches on the enamel. Overall, the mucosa appears healthy without visible inflammation, but the structural anomalies are prominent.
+  VQ metrics: {'mse': np.float64(170.64525010850696), 'l1': np.float64(9.123643663194445), 'psnr': np.float64(25.809861566234513)}
+  Best metrics: {'mse': np.float64(8771.910888671875), 'l1': np.float64(76.06759078414352), 'psnr': np.float64(8.699861497131607)}
+  Panel: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/panels/02_126126_panel.png
+
+[03] 189189 (344x336) 104.4s | VQ_PSNR=21.55dB best_token_match=0.8713
+  Q: Describe the main content of the image.
+  Generated caption: The image is a cross-sectional scan of the abdomen, likely from a computed tomography (CT) scan. It shows the internal structures of the abdomen, including the kidneys, intestines, and other abdominal organs. A yellow arrow is pointing to a specific area, which appears to be a tumor or lesion. The image is in grayscale, which is typical for CT scans, and the structures are displayed in varying shades of gray to represent different densities.
+  (dataset caption preview: The provided image is a coronal section from a non-contrast computed tomography (CT) scan of the abdomen. It shows detailed anatomical structures including both)
+  VQ reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/vq_recon/03_189189.png
+  Best text reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/best_text_recon/03_189189.png
+  Recovered prompt: A chest X-ray.
+  Recovered prompt source: generic_xray
+  Recovered prompt score: 0.871327
+  Top candidate: generic_xray=0.8713: A chest X-ray.
+  Top candidate: generic_medical=0.8675: A medical image.
+  Top candidate: generic_mri=0.8611: An MRI of the brain.
+  VQ metrics: {'mse': np.float64(455.0722384982639), 'l1': np.float64(13.31544777199074), 'psnr': np.float64(21.550000185163448)}
+  Best metrics: {'mse': np.float64(9759.369314688223), 'l1': np.float64(75.44329833984375), 'psnr': np.float64(8.23658607955402)}
+  Panel: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/panels/03_189189_panel.png
+
+[04] 252252 (749x242) 105.5s | VQ_PSNR=22.01dB best_token_match=0.8665
+  Q: Describe the main content of the image.
+  Generated caption: The image shows three different types of medical imaging techniques used to visualize the coronary arteries. The first image on the left is labeled "LAD and LCx, ICA," which stands for Left Anterior Descending artery and Left Coronary Artery. The second image in the middle is labeled "LAD, 64-MDCT," which stands for Left Anterior Descending artery, captured using 64-Megayield-Computed Tomography. The third image on the right is labeled "LcX, 64-MDCT," which stands for Left Coronary Artery, captured using 64-Meg
+  (dataset caption preview: The image shows the results of an invasive coronary angiography (ICA) and a 64-slice multidetector computed tomography (64-MDCT) examination of the coronary art)
+  VQ reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/vq_recon/04_252252.png
+  Best text reconstruction: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/best_text_recon/04_252252.png
+  Recovered prompt: The image shows three different types of medical imaging techniques used to visualize the coronary arteries. The first image on the left is labeled "LAD and LCx, ICA," which stands for Left Anterior Descending artery and Left Coronary Artery. The second image in the middle is labeled "LAD, 64-MDCT," which stands for Left Anterior Descending artery, captured using 64-Megayield-Computed Tomography. The third image on the right is labeled "LcX, 64-MDCT," which stands for Left Coronary Artery, captured using 64-Meg
+  Recovered prompt source: generated_caption
+  Recovered prompt score: 0.866538
+  Top candidate: generated_caption=0.8665: The image shows three different types of medical imaging techniques used to visualize the coronary arteries. The first image on the left is labeled "LAD and LCx, ICA," which stands for Left Anterior Descending artery and Left Coronary Artery. The second image in the middle is labeled "LAD, 64-MDCT," which stands for Left Anterior Descending artery, captured using 64-Megayield-Computed Tomography. The third image on the right is labeled "LcX, 64-MDCT," which stands for Left Coronary Artery, captured using 64-Meg
+  Top candidate: generic_medical=0.8637: A medical image.
+  Top candidate: generic_xray=0.8615: A chest X-ray.
+  VQ metrics: {'mse': np.float64(409.5971589265046), 'l1': np.float64(11.26906105324074), 'psnr': np.float64(22.007234252703043)}
+  Best metrics: {'mse': np.float64(16292.317708333334), 'l1': np.float64(105.04179325810185), 'psnr': np.float64(6.010974904120473)}
+  Panel: /work/um00109/MLLM/ULM-R1/janus_medical_i2t_t2i_cycle_samples/panels/04_252252_panel.png
+

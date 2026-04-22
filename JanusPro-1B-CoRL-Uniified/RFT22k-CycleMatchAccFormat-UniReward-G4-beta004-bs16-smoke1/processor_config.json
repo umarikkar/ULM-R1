@@ -1,0 +1,34 @@
+{
+  "add_special_token": false,
+  "ignore_id": -100,
+  "image_end_tag": "<end_of_image>",
+  "image_processor": {
+    "background_color": [
+      127,
+      127,
+      127
+    ],
+    "do_normalize": true,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_processor_type": "VLMImageProcessor",
+    "image_size": 384,
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "min_size": 14,
+    "rescale_factor": 0.00392156862745098
+  },
+  "image_start_tag": "<begin_of_image>",
+  "image_tag": "<image_placeholder>",
+  "mask_prompt": true,
+  "num_image_tokens": 576,
+  "pad_tag": "<\uff5c\u2581pad\u2581\uff5c>",
+  "processor_class": "VLChatProcessor",
+  "sft_format": "deepseek"
+}

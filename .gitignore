@@ -3,6 +3,7 @@
 ._*
 **/._*
 **/*.pt
+*.png
 **/checkpoints
 **/wget-log
 **/_build/
