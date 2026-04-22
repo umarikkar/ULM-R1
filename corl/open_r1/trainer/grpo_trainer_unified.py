@@ -18,6 +18,8 @@ import time
 from collections import defaultdict
 from typing import Any, Callable, Optional, Union, Sized
 
+import re
+
 import torch
 import torch.nn as nn
 import torch.utils.data
@@ -57,7 +59,7 @@ if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
 from janus.models import VLChatProcessor
-from corl.open_r1.rewards.r_t2i import T2ICycleConsistencyReward
+from corl.open_r1.rewards.r_t2i import T2ICycleConsistencyReward, I2TImageCycleConsistencyReward
 
 # What we call a reward function is a callable that takes
 # a list of prompts and completions and returns a list of rewards.
@@ -83,6 +85,17 @@ def nanstd(tensor: torch.Tensor) -> torch.Tensor:
     count = torch.sum(~torch.isnan(tensor))  # Count of non-NaN values
     variance *= count / (count - 1)  # Bessel's correction
     return torch.sqrt(variance)
+
+
+def fix_janus_text(out_caption):
+    out_caption = out_caption.replace("Ġ", " ")
+    out_caption = out_caption.replace("Ċ", "\n")
+
+    # Optional cleanup for extra spacing/newlines
+    out_caption = re.sub(r"[ \t]+", " ", out_caption)
+    out_caption = re.sub(r"\n\s*\n+", "\n", out_caption)
+
+    return out_caption.strip()
 
 
 class JanusProUnifiedGRPOTrainer(Trainer):
@@ -173,16 +186,19 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
         for i, reward_func in enumerate(reward_funcs):
-            if isinstance(reward_func, str) and 'CycleConsistency' in reward_func:
+            if isinstance(reward_func, str) and 't2i_CycleConsistency' in reward_func:
                 reward_funcs[i] = T2ICycleConsistencyReward(self.task_args)
+
+            elif isinstance(reward_func, str) and 'i2t_CycleConsistency' in reward_func:
+                reward_funcs[i] = I2TImageCycleConsistencyReward(self.task_args)
 
             elif isinstance(reward_func, str):
                 reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
                     reward_func, num_labels=1, **model_init_kwargs
                 )
         # self.reward_funcs = reward_funcs
-        self.t2i_reward_funcs = [rf for rf in reward_funcs if "t2i" in rf.__name__]
-        self.mm2t_reward_funcs = [rf for rf in reward_funcs if "t2i" not in rf.__name__]
+        self.t2i_reward_funcs = [rf for rf in reward_funcs if "t2i" in rf.__name__ or 'i2t' in rf.__name__]
+        self.mm2t_reward_funcs = [rf for rf in reward_funcs if "t2i" not in rf.__name__ and "i2t" not in rf.__name__]
 
         # Reward weights
         if args.reward_weights is not None:  # list[float]
@@ -391,8 +407,8 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         return selective_log_softmax(mm2t_logits, mm2t_input_ids), selective_log_softmax(
             t2i_logits, t2i_discrete_img_ids)
 
-    def wrap_mm2t_prompt(self, inputs, device):
-        prompts = [x["qa_prompt"] for x in inputs]
+
+    def load_batch_images(self, inputs):
         loaded_images = []
         for x in inputs:
             if "image" in x and x["image"] is not None:
@@ -403,6 +419,13 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             if image_path is None:
                 raise KeyError("Each sample must contain 'image' or 'image_full_path'.")
             loaded_images.append(Image.open(image_path).convert("RGB"))
+        return loaded_images
+
+    def wrap_mm2t_prompt(self, inputs, device, loaded_images=None):
+        prompts = [x["qa_prompt"] for x in inputs]
+
+        if loaded_images is None:
+            loaded_images = self.load_batch_images(inputs)
 
         images = [[img] for img in loaded_images]
 
@@ -435,41 +458,107 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
         return prompt_inputs, prompts
 
+    def wrap_i2t_prompt(self, inputs, device=None, loaded_images=None):
+
+        if loaded_images is None:
+            loaded_images = self.load_batch_images(inputs)
+
+        " we have to tokenize the i2t prompt, and possibly the images as well "
+
+
+        task_instruct = "Describe the main content of the image in one sentence."
+        _prompts, _images = [], []
+        for img in loaded_images:
+            _prompts.append(
+                [
+                    {
+                        "role": "<|User|>",
+                        "content": f"<image_placeholder>\n{task_instruct}",
+                        # "images": [example["image"]],
+                    },
+                    {"role": "<|Assistant|>", "content": ""},
+                ],
+            )
+            _images.append([img])
+
+        prepare_inputs = self.processing_class(
+            conversations=_prompts, images=_images, force_batchify=True,
+        ).to(device)
+
+        return prepare_inputs
+
     def _generate_and_score_completions(self, inputs):
         device = self.accelerator.device
 
-        # Prepare inputs for text-to-image generation
-        t2i_prompt_inputs, t2i_prompts = self.wrap_t2i_prompt(inputs, device)
-        t2i_prompt_ids = t2i_prompt_inputs["input_ids"]
-        t2i_prompt_mask = t2i_prompt_inputs["attention_mask"]
-        t2i_prompts = [
-            pp.strip('<|User|>:').strip('<|Assistant|>:<begin_of_image>').strip()
-            for pp in t2i_prompts
-        ]
-        if self.max_prompt_length is not None:
-            t2i_prompt_ids = t2i_prompt_ids[:, -self.max_prompt_length:]
-            t2i_prompt_mask = t2i_prompt_mask[:, -self.max_prompt_length:]
+        use_t2i_cycle_consistency = any(
+            "t2i_CycleConsistency" in rf.__name__ for rf in self.t2i_reward_funcs
+        )
 
-        # Prepare inputs for multimodal understanding
-        mm2t_prompt_inputs, mm2t_prompts, batch_images = self.wrap_mm2t_prompt(inputs, device)
-        mm2t_prompt_ids = mm2t_prompt_inputs["input_ids"]  # [bs, n_prompt+n_img]
-        mm2t_prompt_mask = mm2t_prompt_inputs["attention_mask"]  # [bs, n_prompt+n_img]
-        mm2t_images_in_prompt_mask = mm2t_prompt_inputs["images_seq_mask"]  # [bs, n_prompt+n_img]
-        mm2t_pixel_values = mm2t_prompt_inputs["pixel_values"]  # [bs, 1, 3, 384, 384]
-        mm2t_images_emb_mask = mm2t_prompt_inputs["images_emb_mask"]  # [bs, 1, 576]
-        if self.max_prompt_length is not None:
-            mm2t_prompt_ids = mm2t_prompt_ids[:, -self.max_prompt_length:]
-            mm2t_prompt_mask = mm2t_prompt_mask[:, -self.max_prompt_length:]
-            mm2t_images_in_prompt_mask = mm2t_images_in_prompt_mask[:, -self.max_prompt_length:]
+        use_i2t_cycle_consistency = any(
+            "i2t_CycleConsistency" in rf.__name__ for rf in self.t2i_reward_funcs
+        )
+
+        use_mm2t_rewards = len(self.mm2t_reward_funcs) > 0
+
+        loaded_images = self.load_batch_images(inputs) 
+
+        if use_t2i_cycle_consistency:
+            # Prepare inputs for text-to-image generation
+            t2i_prompt_inputs, t2i_prompts = self.wrap_t2i_prompt(inputs, device)
+            t2i_prompt_ids = t2i_prompt_inputs["input_ids"]
+            t2i_prompt_mask = t2i_prompt_inputs["attention_mask"]
+            t2i_prompts = [
+                pp.strip('<|User|>:').strip('<|Assistant|>:<begin_of_image>').strip()
+                for pp in t2i_prompts
+            ]
+            if self.max_prompt_length is not None:
+                t2i_prompt_ids = t2i_prompt_ids[:, -self.max_prompt_length:]
+                t2i_prompt_mask = t2i_prompt_mask[:, -self.max_prompt_length:]
+
+        if use_i2t_cycle_consistency:
+            # Prepare inputs for image-to-text generation
+            i2t_prepared_inputs = self.wrap_i2t_prompt(inputs, device, loaded_images=loaded_images)
+
+        if use_mm2t_rewards:
+            # Prepare inputs for multimodal understanding
+            mm2t_prompt_inputs, mm2t_prompts, batch_images = self.wrap_mm2t_prompt(inputs, device, loaded_images=loaded_images)
+            mm2t_prompt_ids = mm2t_prompt_inputs["input_ids"]  # [bs, n_prompt+n_img]
+            mm2t_prompt_mask = mm2t_prompt_inputs["attention_mask"]  # [bs, n_prompt+n_img]
+            mm2t_images_in_prompt_mask = mm2t_prompt_inputs["images_seq_mask"]  # [bs, n_prompt+n_img]
+            mm2t_pixel_values = mm2t_prompt_inputs["pixel_values"]  # [bs, 1, 3, 384, 384]
+            mm2t_images_emb_mask = mm2t_prompt_inputs["images_emb_mask"]  # [bs, 1, 576]
+            if self.max_prompt_length is not None:
+                mm2t_prompt_ids = mm2t_prompt_ids[:, -self.max_prompt_length:]
+                mm2t_prompt_mask = mm2t_prompt_mask[:, -self.max_prompt_length:]
+                mm2t_images_in_prompt_mask = mm2t_images_in_prompt_mask[:, -self.max_prompt_length:]
 
         # ******************************************************************************
         # === Generate completion ===
         with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
-            # generate images: discrete image IDs,
-            t2i_completion_ids, t2i_completions = unwrapped_model.t2i_generate_parallel(
-                input_ids=t2i_prompt_ids, attention_mask=t2i_prompt_mask,
-                **self.t2i_generation_kwargs
-            )
+
+            if use_i2t_cycle_consistency:
+
+                i2t_input_embeds = unwrapped_model.prepare_inputs_embeds(**i2t_prepared_inputs)  # [bs, n_prompt+n_img, dim]
+                i2t_outputs = unwrapped_model.language_model.generate(
+                    inputs_embeds=i2t_input_embeds,
+                    attention_mask=i2t_prepared_inputs.attention_mask,
+                    generation_config=self.generation_config,
+                ) # [bs * num_generations, n_completion]
+                i2t_captions = self.processing_class.tokenizer.batch_decode(i2t_outputs, skip_special_tokens=True)
+                i2t_captions = [fix_janus_text(cap) for cap in i2t_captions]
+
+                
+
+                # print('x')
+
+
+            if use_t2i_cycle_consistency:
+
+                # generate images: discrete image IDs,
+                t2i_completion_ids, t2i_completions = unwrapped_model.t2i_generate_parallel(
+                    input_ids=t2i_prompt_ids, attention_mask=t2i_prompt_mask,
+                    **self.t2i_generation_kwargs
+                )
 
             # generate texts
             inputs_embeds = unwrapped_model.prepare_inputs_embeds(

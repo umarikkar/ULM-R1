@@ -18,6 +18,14 @@ import torch
 torch.backends.cudnn.enabled = False  # cuDNN 9.1.9 fails to initialize on this system
 os.environ["WANDB_DISABLED"] = "true"
 
+DEFAULT_IMAGE_BASE_DIR = "/projects/u6gd/datasets/PubMedVision/images"
+RETINA03_IMAGE_BASE_DIR = "/work/um00109/MLLM/datasets/PubMedVision/images"
+RETINA03_HOSTNAME = "cvssp-retina03"
+HOSTNAME = os.uname().nodename.split(".")[0]
+IMAGE_BASE_DIR = (
+    RETINA03_IMAGE_BASE_DIR if HOSTNAME == RETINA03_HOSTNAME else DEFAULT_IMAGE_BASE_DIR
+)
+
 # Add project root to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../.."))
@@ -80,7 +88,7 @@ if __name__ == "__main__":
     # ---- Paths (edit these) ---- #
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
-    DATA_PATH = "/projects/u6gd/umar/codes/ULM-R1/data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
+    DATA_PATH = "data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
     SAVE_DIR = "./JanusPro-1B-CoRL-Uniified"
     SAVE_PATH = f"{SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16"
 
@@ -90,9 +98,15 @@ if __name__ == "__main__":
     script_args = GRPOScriptArguments(
         dataset_name=DATA_PATH,
         model_ckpt_dir=MODEL_CKPT_DIR,
-        image_base_dir="/projects/u6gd/datasets/PubMedVision/images",
+        image_base_dir=IMAGE_BASE_DIR,
         lazy_image_loading=True,
-        reward_funcs=["t2i_bid_cycle_reward", "t2i_ti_sim", "qa_accuracy", "format"],
+        reward_funcs=[
+            "t2i_bid_cycle_reward",
+            "t2i_match",
+            # "i2t_image_cycle_reward",
+            # "qa_accuracy",
+            # "format",
+        ],
         task_format="unify",
         unify_advantage=False,
         unify_reward=True,
@@ -106,9 +120,9 @@ if __name__ == "__main__":
         beta=0.0,
         max_prompt_length=1024,
         max_completion_length=512,
-        num_generations=4,
+        num_generations=2,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=2,
         num_train_epochs=1,
         learning_rate=4e-6,
         bf16=True,
@@ -124,10 +138,12 @@ if __name__ == "__main__":
         torch_dtype="bfloat16",
     )
 
-    # Print memory every N seconds while debugging training.
-    monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))
-    mem_stop_event = _start_memory_monitor(interval_sec=monitor_interval)
-    try:
-        main(script_args, training_args, model_args, max_samples=1000)
-    finally:
-        mem_stop_event.set()
+    main(script_args, training_args, model_args, max_samples=1000)
+
+    # # Print memory every N seconds while debugging training.
+    # monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))
+    # mem_stop_event = _start_memory_monitor(interval_sec=monitor_interval)
+    # try:
+    #     main(script_args, training_args, model_args, max_samples=1000)
+    # finally:
+    #     mem_stop_event.set()

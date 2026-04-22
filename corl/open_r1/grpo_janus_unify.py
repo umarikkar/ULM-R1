@@ -24,7 +24,7 @@ from trl import (
     GRPOConfig, ModelConfig, ScriptArguments,
     TrlParser, get_peft_config
 )
-from corl.open_r1.trainer.grpo_trainer_unified import JanusProUnifiedGRPOTrainer
+from corl.open_r1.trainer.grpo_trainer_unified_noMM import JanusProUnifiedGRPOTrainer
 from corl.open_r1.rewards import reward_funcs_registry
 
 

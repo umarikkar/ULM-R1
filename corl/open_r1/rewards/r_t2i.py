@@ -202,6 +202,97 @@ class T2ICycleConsistencyReward:
         return 't2i_CycleConsistency'
 
 
+class I2TImageCycleConsistencyReward(T2ICycleConsistencyReward):
+    def __init__(self, task_args):
+        super().__init__(task_args)
+
+    @torch.inference_mode()
+    def generate_images_from_captions(self, captions, mmgpt=None, processing_class=None):
+        device = mmgpt.device
+
+        prompts = []
+        for caption in captions:
+            conv = [
+                {
+                    "role": "<|User|>",
+                    "content": caption,
+                },
+                {"role": "<|Assistant|>", "content": ""},
+            ]
+            sft_format = processing_class.apply_sft_template_for_multi_turn_prompts(
+                conversations=conv,
+                sft_format=processing_class.sft_format,
+                system_prompt="",
+            )
+            prompts.append(sft_format + processing_class.image_start_tag)
+
+        prompt_inputs = processing_class.tokenizer(
+            prompts,
+            padding=True,
+            padding_side="left",
+            return_tensors="pt",
+        ).to(device)
+
+        _, regenerated_images = mmgpt.t2i_generate_parallel(
+            input_ids=prompt_inputs["input_ids"],
+            attention_mask=prompt_inputs["attention_mask"],
+            cfg_weight=5,
+            parallel_size=1,
+            temperature=1,
+            image_token_num_per_image=576,
+            img_size=384,
+            patch_size=16,
+            pad_id=processing_class.pad_id,
+            seed=self.args.seed,
+        )
+        return regenerated_images
+
+    def _resolve_reference_texts(self, captions=None, detailed_captions=None):
+        if captions is None and detailed_captions is None:
+            raise ValueError("I2T image cycle reward requires 'caption' or 'detailed_caption'.")
+
+        if captions is None:
+            return detailed_captions
+        if detailed_captions is None:
+            return captions
+
+        refs = []
+        for cap, dcap in zip(captions, detailed_captions):
+            if cap is not None and str(cap).strip() != "":
+                refs.append(cap)
+            else:
+                refs.append(dcap)
+        return refs
+
+    def __call__(
+            self, completions, prompts=None, mmgpt=None, processing_class=None, **kwargs
+    ):
+        device = mmgpt.device
+
+        ref_texts = self._resolve_reference_texts(
+            captions=kwargs.get("caption", None),
+            detailed_captions=kwargs.get("detailed_caption", None),
+        )
+        cap_cs_scores = self.compute_caption_consistency(completions, ref_texts)
+
+        if self.using_img_cs:
+            regenerated_images = self.generate_images_from_captions(
+                completions, mmgpt=mmgpt, processing_class=processing_class
+            )
+            img_cs_scores = self.compute_image_consistency(
+                regenerated_images, kwargs["image"], device
+            )
+            rewards = [a + b for a, b in zip(cap_cs_scores, img_cs_scores)]
+        else:
+            rewards = cap_cs_scores
+
+        return rewards
+
+    @property
+    def __name__(self):
+        return 'i2t_CycleConsistency'
+
+
 @torch.inference_mode()
 def t2i_match_reward(
         completions, prompts=None,

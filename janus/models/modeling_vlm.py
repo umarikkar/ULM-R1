@@ -358,7 +358,11 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             )
             hidden_states = outputs.last_hidden_state
 
-            logits = self.gen_head(hidden_states[:, -t2i_logits_to_keep:, :]).contiguous()
+            # Shift by -1: to score img_k we need the hidden state at position P-1+k
+            # (the one whose next-token prediction is img_k), not position P+k.
+            logits = self.gen_head(
+                hidden_states[:, -t2i_logits_to_keep - 1 : -1, :]
+            ).contiguous()
 
             return CausalLMOutputWithPast(
                 # loss=loss,
@@ -410,8 +414,9 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 past_key_values=None
             )
 
+            # Shift by -1: see note in the task=="generation" branch above.
             t2i_logits = self.gen_head(
-                outputs.last_hidden_state[:, -t2i_logits_to_keep:, :]
+                outputs.last_hidden_state[:, -t2i_logits_to_keep - 1 : -1, :]
             ).contiguous()
 
             return mm2t_logits, t2i_logits
