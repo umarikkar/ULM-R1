@@ -133,6 +133,10 @@ outputs
 
 # large local artifacts
 checkpoint/
+**/checkpoint-*/
+**/checkpoint_*/
+*.safetensors
+**/training_args.bin
 cycle_check_medical/
 TEST_INPUT.txt
 scp_bundle.tar

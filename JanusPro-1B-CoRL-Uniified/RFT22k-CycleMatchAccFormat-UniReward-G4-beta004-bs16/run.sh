@@ -29,13 +29,13 @@ num_train_epochs=1
 max_prompt_length=1024
 max_completion_length=576
 
-num_generation=8
+num_generation=4
 gradient_accumulation_steps=4
 per_device_train_batch_size=1
 max_samples=50000
 lazy_image_loading=True
 
-SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G8-bs16
+SAVE_PATH=${SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16
 mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 

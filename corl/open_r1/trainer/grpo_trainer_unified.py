@@ -14,6 +14,7 @@
 
 import copy
 import warnings
+import time
 from collections import defaultdict
 from typing import Any, Callable, Optional, Union, Sized
 
@@ -36,6 +37,7 @@ from transformers import (
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
 from accelerate.utils import gather, is_peft_model, set_seed
+from PIL import Image
 
 from trl.import_utils import is_deepspeed_available
 from trl import ScriptArguments
@@ -391,13 +393,24 @@ class JanusProUnifiedGRPOTrainer(Trainer):
 
     def wrap_mm2t_prompt(self, inputs, device):
         prompts = [x["qa_prompt"] for x in inputs]
-        images = [[x["image"]] for x in inputs]  # PIL.Image
+        loaded_images = []
+        for x in inputs:
+            if "image" in x and x["image"] is not None:
+                loaded_images.append(x["image"].convert("RGB"))
+                continue
+
+            image_path = x.get("image_full_path")
+            if image_path is None:
+                raise KeyError("Each sample must contain 'image' or 'image_full_path'.")
+            loaded_images.append(Image.open(image_path).convert("RGB"))
+
+        images = [[img] for img in loaded_images]
 
         prompt_inputs = self.processing_class(
             conversations=prompts, images=images, force_batchify=True,
         ).to(device)
 
-        return prompt_inputs, prompts
+        return prompt_inputs, prompts, loaded_images
 
     def wrap_t2i_prompt(self, inputs, device=None):
         prompts = []
@@ -438,7 +451,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
             t2i_prompt_mask = t2i_prompt_mask[:, -self.max_prompt_length:]
 
         # Prepare inputs for multimodal understanding
-        mm2t_prompt_inputs, mm2t_prompts = self.wrap_mm2t_prompt(inputs, device)
+        mm2t_prompt_inputs, mm2t_prompts, batch_images = self.wrap_mm2t_prompt(inputs, device)
         mm2t_prompt_ids = mm2t_prompt_inputs["input_ids"]  # [bs, n_prompt+n_img]
         mm2t_prompt_mask = mm2t_prompt_inputs["attention_mask"]  # [bs, n_prompt+n_img]
         mm2t_images_in_prompt_mask = mm2t_prompt_inputs["images_seq_mask"]  # [bs, n_prompt+n_img]
@@ -534,8 +547,7 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         for i, (reward_func) in enumerate(self.t2i_reward_funcs):
             if "t2i_CycleConsistency" in reward_func.__name__:
                 reward_kwargs = {
-                    key: [example[key] for example in inputs for _ in range(self.num_generations)]
-                    for key in inputs[0].keys() if key in ["image"]
+                    "image": [img for img in batch_images for _ in range(self.num_generations)]
                 }
                 # [bs * parallel_size, 3, 384, 384]
                 output_reward_func = reward_func(
@@ -832,6 +844,12 @@ class JanusProUnifiedGRPOTrainer(Trainer):
         loss_t2i = (t2i_per_token_loss * t2i_completion_mask).sum() / t2i_completion_mask.sum().clamp(min=1.0)
 
         return loss_mm2t + loss_t2i
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        step_start = time.perf_counter()
+        loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+        self._metrics["train_step_time_s"].append(time.perf_counter() - step_start)
+        return loss
 
     # Trainer "prepares" the inputs before calling `compute_loss`. It converts to tensor and move
     # to device. Since we preprocess the data in `compute_loss`,

@@ -14,6 +14,7 @@
 
 from dataclasses import dataclass, field
 import os
+import time
 from typing import Optional
 from datasets import load_dataset, Image as HFImage
 from PIL import Image
@@ -120,9 +121,18 @@ class GRPOScriptArguments(ScriptArguments):
         default="",
         metadata={"help": "Base directory for image_path column in parquet datasets."},
     )
+    lazy_image_loading: bool = field(
+        default=False,
+        metadata={"help": "If true, keep image paths only and decode images lazily in the trainer."},
+    )
+    max_samples: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional limit on samples per split for faster debugging runs."},
+    )
 
 
 def main(script_args, training_args, model_args, max_samples=None):
+    preprocess_start = time.perf_counter()
     if script_args.dataset_name.endswith(".parquet") or os.path.isdir(script_args.dataset_name):
         data_files = (
             os.path.join(script_args.dataset_name, "*.parquet")
@@ -164,11 +174,16 @@ def main(script_args, training_args, model_args, max_samples=None):
         # Filter out rows where the image file is missing
         dataset = dataset.filter(lambda x: os.path.exists(x["image_full_path"]))
 
-        def load_image(example):
-            example["image"] = Image.open(example["image_full_path"]).convert("RGB")
-            return example
+        if script_args.lazy_image_loading:
+            print("[data] using lazy image loading (paths only; images decoded in trainer)")
+        else:
+            def load_image(example):
+                example["image"] = Image.open(example["image_full_path"]).convert("RGB")
+                return example
 
-        dataset = dataset.map(load_image)
+            dataset = dataset.map(load_image)
+            print("[data] using eager image loading (decoded during preprocessing)")
+
     elif "image" in dataset[script_args.dataset_train_split].column_names:
         dataset = dataset.cast_column("image", HFImage())
 
@@ -237,11 +252,14 @@ def main(script_args, training_args, model_args, max_samples=None):
     else:
         dataset = dataset.map(make_conversation_joint)
 
+    print(f"[timing] dataset preprocessing took {time.perf_counter() - preprocess_start:.2f}s")
+
     trainer_cls = JanusProUnifiedGRPOTrainer
 
     print("using: ", trainer_cls)
 
     # Initialize the GRPO trainer
+    train_start = time.perf_counter()
     trainer = trainer_cls(
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
@@ -255,6 +273,7 @@ def main(script_args, training_args, model_args, max_samples=None):
     )
 
     trainer.train()
+    print(f"[timing] trainer.train() took {time.perf_counter() - train_start:.2f}s")
 
     # Save and push to hub
     trainer.save_model(training_args.output_dir)
@@ -267,4 +286,4 @@ if __name__ == "__main__":
 
     script_args, training_args, model_args = parser.parse_args_and_config()
 
-    main(script_args, training_args, model_args)
+    main(script_args, training_args, model_args, max_samples=script_args.max_samples)
