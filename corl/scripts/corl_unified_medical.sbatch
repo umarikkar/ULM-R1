@@ -16,4 +16,4 @@ cd /projects/u6gd/umar/codes/ULM-R1
 hostname
 nvidia-smi --list-gpus
 
-bash corl/scripts/corl_unified_medical.sh
+bash corl/scripts/corl_unified_medical_noMM.sh

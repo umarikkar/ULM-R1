@@ -5,12 +5,9 @@ source /projects/u6gd/umar/env.sh
 
 cd /projects/u6gd/umar/codes/ULM-R1
 
-CUDA_VISIBLE_DEVICES=0,1,2,3
+CUDA_VISIBLE_DEVICES=0
 
 conda activate corl
-
-export WANDB_API_KEY="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"
-
 wandb login
 
 # *****************  ***************** #
@@ -20,7 +17,7 @@ IMAGE_BASE_DIR=/projects/u6gd/datasets/PubMedVision/images
 
 # T2I-only: noMM trainer strips MM2T path; task_format must be 't2i'.
 task_format=t2i
-SAVE_DIR=./JanusPro-1B-CoRL-noMM
+SAVE_DIR=./JanusPro-1B-CoRL-noMM_test
 
 # T2I-only rewards. qa_accuracy / format are MM2T rewards and are dropped.
 reward_funcs="t2i_bid_cycle_reward t2i_match"
@@ -45,7 +42,7 @@ mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 
 # --deepspeed scripts/zero3.json
-torchrun --nproc_per_node="4" \
+torchrun --nproc_per_node="1" \
     --nnodes="1" \
     --node_rank="0" \
     --master_addr="127.0.0.1" \

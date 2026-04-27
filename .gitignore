@@ -13,6 +13,8 @@
 **/playground
 **/wandb
 
+results/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -141,3 +143,6 @@ checkpoint/
 cycle_check_medical/
 TEST_INPUT.txt
 scp_bundle.tar
+
+# local core dump / artifact file
+/core
