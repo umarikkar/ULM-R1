@@ -228,6 +228,11 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         language_config = config.language_config
         self.language_model = LlamaForCausalLM(language_config)
 
+        # Learnable mask query token in the LLM input embedding space (used by SFT alignment trainer)
+        self.mask_token_embed = torch.nn.Parameter(
+            torch.zeros(1, 1, language_config.hidden_size)
+        )
+
         self.post_init()
 
     def prepare_inputs_embeds(
@@ -528,6 +533,8 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             patch_size: int = 16,
             pad_id: int = 100002,
             seed=42,
+
+            completion_type="image",
     ):
         generator = torch.Generator(device='cuda').manual_seed(seed)
         device = input_ids.device
@@ -577,14 +584,17 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             inputs_embeds = img_embeds.unsqueeze(dim=1)
 
         # completions
-        dec = self.gen_vision_model.decode_code(
-            generated_tokens.to(dtype=torch.int),
-            shape=[bs, 8, img_size // patch_size, img_size // patch_size]
-        )
-        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-        # [bs, 384, 384, 3]
-        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
-        completions = [Image.fromarray(d) for d in dec]
+        completions = []
+        if completion_type == "image":
+
+            dec = self.gen_vision_model.decode_code(
+                generated_tokens.to(dtype=torch.int),
+                shape=[bs, 8, img_size // patch_size, img_size // patch_size]
+            )
+            dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+            # [bs, 384, 384, 3]
+            dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+            completions = [Image.fromarray(d) for d in dec]
 
         return generated_tokens, completions
 

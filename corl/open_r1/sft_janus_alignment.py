@@ -70,14 +70,15 @@ class SFTScriptArguments(ScriptArguments):
             "help": "Possible values: 'qa', 'od' (object detection), 'oc' (object classification)"
         },
     )
-    unify_advantage: bool = field(
-        default=False,
-        metadata={"help": "Whether to delete unused modules in janus."},
+
+    alignment_losses: list[str] = field(
+        default_factory=lambda: ["masking"],
+        metadata={
+            "help": "List of alignment losses to apply. Possible values: 'masking', 'hidden'",
+            "nargs": "+",
+        },
     )
-    unify_reward: bool = field(
-        default=True,
-        metadata={"help": "Whether to delete unused modules in janus."},
-    )
+
     caption_cs_metrics: list[str] = field(
         default_factory=lambda: ["jaccard", "bertscore"],
         metadata={
@@ -109,13 +110,11 @@ class SFTScriptArguments(ScriptArguments):
     model_ckpt_dir: str = field(
         default="./checkpoint/"
     )
-    blip_model_ckpt: str = field(
-        default="./checkpoint/blip-image-captioning-base"
-    )
+
     dataset_cache_dir: str = field(
         default=os.environ.get("HF_DATASETS_CACHE", None),
     )
-    image_base_dir: str = field(
+    data_dir: str = field(
         default="",
         metadata={"help": "Base directory for image_path column in parquet datasets."},
     )
@@ -145,19 +144,8 @@ class SFTScriptArguments(ScriptArguments):
 
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()
-    if script_args.dataset_name.endswith(".parquet") or os.path.isdir(script_args.dataset_name):
-        data_files = (
-            os.path.join(script_args.dataset_name, "*.parquet")
-            if os.path.isdir(script_args.dataset_name)
-            else script_args.dataset_name
-        )
-        dataset = load_dataset("parquet", data_files=data_files, cache_dir=script_args.dataset_cache_dir)
-    else:
-        dataset = load_dataset(
-            script_args.dataset_name,
-            name=script_args.dataset_config,
-            cache_dir=script_args.dataset_cache_dir,
-        )
+
+    dataset = load_dataset("json", data_files=os.path.join(script_args.data_dir, script_args.dataset_name))
 
     # Optionally limit dataset size for debugging
     if max_samples is not None:
@@ -166,95 +154,21 @@ def main(script_args, training_args, model_args, max_samples=None):
                 dataset[split] = dataset[split].select(range(max_samples))
 
     # Resolve image paths and filter out missing images
-    image_base_dir = script_args.image_base_dir
+    data_dir = script_args.data_dir
 
-    if "image_path" in dataset[script_args.dataset_train_split].column_names:
-        def resolve_image_path(example):
-            img_path = os.path.join(image_base_dir, example["image_path"]) if image_base_dir else example["image_path"]
-            example["image_full_path"] = img_path
-            return example
+    def resolve_image_path(example):
+        img_path = os.path.join(data_dir, example["image"][0]) if data_dir else example["image"][0]
+        example["image"] = img_path
+        return example
+    
+    def add_dummy_prompt(example):
+        example["prompt"] = "Describe the main content of the image in one sentence."
+        return example
 
-        dataset = dataset.map(resolve_image_path)
-        # Filter out rows where the image file is missing
-        dataset = dataset.filter(lambda x: os.path.exists(x["image_full_path"]))
-
-        if script_args.lazy_image_loading:
-            print("[data] using lazy image loading (paths only; images decoded in trainer)")
-        else:
-            def load_image(example):
-                example["image"] = Image.open(example["image_full_path"]).convert("RGB")
-                return example
-
-            dataset = dataset.map(load_image)
-            print("[data] using eager image loading (decoded during preprocessing)")
-
-    elif "image" in dataset[script_args.dataset_train_split].column_names:
-        dataset = dataset.cast_column("image", HFImage())
-
-        def ensure_rgb(example):
-            example["image"] = example["image"].convert("RGB")
-            return example
-
-        dataset = dataset.map(ensure_rgb)
-
-    # Format into conversation
-    def make_conversation_t2i(example):
-        return {
-            "prompt": [
-                {
-                    "role": "<|User|>",
-                    "content": f"{example['detailed_caption'].strip()}",
-                },
-                {"role": "<|Assistant|>", "content": ""},
-            ],
-        }
-
-    def make_conversation_mm2t(example):
-        if script_args.mm2t_format == 'qa':
-            question = example["qa_problem"]
-        elif script_args.mm2t_format == 'oc':
-            question = example["cls_problem"]
-        elif script_args.mm2t_format == 'od':
-            question = example["od_problem"]
-        else:
-            question = example["problem"]
-
-        return {
-            "qa_prompt": [
-                {
-                    "role": "<|User|>",
-                    "content": f"<image_placeholder>\n{question}",
-                },
-                {"role": "<|Assistant|>", "content": ""},
-            ],
-        }
-
-    def make_conversation_joint(example):
-        return {
-            "prompt": [
-                {
-                    "role": "<|User|>",
-                    "content": f"{example['detailed_caption'].strip()}",
-                },
-                {"role": "<|Assistant|>", "content": ""},
-            ],
-            "qa_prompt": [
-                {
-                    "role": "<|User|>",
-                    "content": f"<image_placeholder>\n{example['caption']}",
-                },
-                {"role": "<|Assistant|>", "content": ""},
-            ],
-            "qa_solution": example["caption"],
-        }
-
-    if script_args.task_format == "t2i":
-        dataset = dataset.map(make_conversation_t2i)
-    elif script_args.task_format == "mm2t":
-        dataset = dataset.map(make_conversation_mm2t)
-        # dataset = dataset.remove_columns(["type"])
-    else:
-        dataset = dataset.map(make_conversation_joint)
+    dataset = dataset.map(resolve_image_path)
+    dataset = dataset.map(add_dummy_prompt)
+    # Filter out rows where the image file is missing
+    dataset = dataset.filter(lambda x: os.path.exists(x["image"]))
 
     print(f"[timing] dataset preprocessing took {time.perf_counter() - preprocess_start:.2f}s")
 

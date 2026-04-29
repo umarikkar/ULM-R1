@@ -18,13 +18,17 @@ import torch
 torch.backends.cudnn.enabled = False  # cuDNN 9.1.9 fails to initialize on this system
 os.environ["WANDB_DISABLED"] = "true"
 
-DEFAULT_IMAGE_BASE_DIR = "/projects/u6gd/datasets/PubMedVision/images"
-RETINA03_IMAGE_BASE_DIR = "/work/um00109/MLLM/datasets/PubMedVision/images"
-RETINA03_HOSTNAME = "cvssp-retina03"
+DEFAULT_DATA_DIR = "/projects/u6gd/datasets/PubMedVision"
+
+
+DATA_DIR_DICT = {
+    "cvssp-retina03": "/work/um00109/MLLM/datasets/PubMedVision",
+    "ulws072": "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision",
+}
+
 HOSTNAME = os.uname().nodename.split(".")[0]
-IMAGE_BASE_DIR = (
-    RETINA03_IMAGE_BASE_DIR if HOSTNAME == RETINA03_HOSTNAME else DEFAULT_IMAGE_BASE_DIR
-)
+DATA_DIR = (DATA_DIR_DICT.get(HOSTNAME) if HOSTNAME in DATA_DIR_DICT.keys() else DEFAULT_DATA_DIR)
+
 
 # Add project root to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +92,7 @@ if __name__ == "__main__":
     # ---- Paths (edit these) ---- #
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
-    DATA_PATH = "data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
+    DATA_PATH = "./PubMedVision_Original_Caption.json" 
     SAVE_DIR = "./results/JanusPro-1B-CoRL-Uniified"
     SAVE_PATH = f"{SAVE_DIR}/AlignmentSFT"
 
@@ -98,10 +102,11 @@ if __name__ == "__main__":
     script_args = SFTScriptArguments(
         dataset_name=DATA_PATH,
         model_ckpt_dir=MODEL_CKPT_DIR,
-        image_base_dir=IMAGE_BASE_DIR,
+        data_dir=DATA_DIR,
         lazy_image_loading=True,
         max_prompt_length=1024,
         max_completion_length=512,
+        alignment_losses=["masking", "hidden"],
     )
 
     # ---- Training arguments ---- #
@@ -110,9 +115,10 @@ if __name__ == "__main__":
         report_to="none",
         logging_steps=1,
         per_device_train_batch_size=2,
-        gradient_accumulation_steps=1,
+        remove_unused_columns=False,
+        gradient_accumulation_steps=8,
         num_train_epochs=1,
-        learning_rate=4e-6,
+        learning_rate=4e-5,
         bf16=True,
         gradient_checkpointing=False,
         save_steps=200,
@@ -126,7 +132,7 @@ if __name__ == "__main__":
         torch_dtype="bfloat16",
     )
 
-    main(script_args, training_args, model_args, max_samples=1000)
+    main(script_args, training_args, model_args, max_samples=50000)
 
     # # Print memory every N seconds while debugging training.
     # monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))

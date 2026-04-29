@@ -18,38 +18,29 @@
 import re
 import time
 from collections import defaultdict
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 import torch.utils.data
 import transformers
 from packaging import version
 from datasets import Dataset, IterableDataset
 from transformers import (
     AutoModelForCausalLM,
-    AutoModelForSequenceClassification,
     AutoTokenizer,
-    GenerationConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     Trainer,
     TrainerCallback,
 )
-from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
-from accelerate.utils import gather, is_peft_model, set_seed
+from accelerate.utils import set_seed
 from PIL import Image
+import torchvision.transforms as T
 
 from trl.import_utils import is_deepspeed_available
-from trl import ScriptArguments
-from trl.trainer.callbacks import SyncRefModelCallback
-from trl.models import (
-    create_reference_model,
-    prepare_deepspeed,
-    unwrap_model_for_generation,
-)
-from trl import SFTConfig
-from trl.trainer.utils import selective_log_softmax
+from trl import ScriptArguments, SFTConfig
 
 if is_deepspeed_available():
     import deepspeed  # noqa: F401
@@ -58,17 +49,12 @@ if is_peft_available():
     from peft import PeftConfig, get_peft_model
 
 from janus.models import VLChatProcessor
-from corl.open_r1.rewards.r_t2i import T2ICycleConsistencyReward
 
-
-RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
-
-
-def nanstd(tensor: torch.Tensor) -> torch.Tensor:
-    variance = torch.nanmean((tensor - torch.nanmean(tensor, keepdim=True)) ** 2)
-    count = torch.sum(~torch.isnan(tensor))
-    variance *= count / (count - 1)
-    return torch.sqrt(variance)
+VQ_TRANSFORM = T.Compose([
+    T.Resize((224, 224), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
+    T.ToTensor(),
+    T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+])
 
 
 def fix_janus_text(out_caption):
@@ -168,7 +154,6 @@ class SFTAlignmentTrainer(Trainer):
         print(task_args)
 
         self.max_prompt_length = task_args.max_prompt_length
-        self.max_completion_length = task_args.max_completion_length
         self.temperature = task_args.temperature
 
         super().__init__(
@@ -183,20 +168,7 @@ class SFTAlignmentTrainer(Trainer):
         )
 
         self._metrics = defaultdict(list)
-
         set_seed(args.seed, device_specific=True)
-
-        self.t2i_generation_kwargs = {
-            "cfg_weight": 5,
-            "parallel_size": 1,
-            "temperature": 1,  # HACK
-            "image_token_num_per_image": 576,
-            "img_size": 384,
-            "patch_size": 16,
-            "pad_id": processing_class.pad_id,
-            "seed": self.args.seed,
-        }
-
         self.model_accepts_loss_kwargs = False
 
 
@@ -225,37 +197,19 @@ class SFTAlignmentTrainer(Trainer):
         for param in model.gen_aligner.parameters():
             param.requires_grad = True
 
+        # learnable mask query token (defined on the model itself; flag it trainable)
+        model.mask_token_embed.requires_grad = True
+
         return model
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
             self._signature_columns = ["prompt"]
 
-    def _get_per_token_logps(
-            self, model,
-            t2i_inputs_ids, t2i_attention_mask,
-            t2i_discrete_img_ids, t2i_logits_to_keep,
-    ):
-        t2i_discrete_img_ids = t2i_discrete_img_ids.to(t2i_inputs_ids.dtype)
-
-        outputs = model(
-            t2i_input_ids=t2i_inputs_ids,
-            t2i_attention_mask=t2i_attention_mask,
-            t2i_discrete_img_ids=t2i_discrete_img_ids,
-            t2i_logits_to_keep=t2i_logits_to_keep,
-            task="generation",
-        )
-        t2i_logits = outputs.logits / self.temperature
-        return selective_log_softmax(t2i_logits, t2i_discrete_img_ids)
-
     def load_batch_images(self, inputs):
         loaded_images = []
         for x in inputs:
-            if "image" in x and x["image"] is not None:
-                loaded_images.append(x["image"].convert("RGB"))
-                continue
-
-            image_path = x.get("image_full_path")
+            image_path = x.get("image")
             if image_path is None:
                 raise KeyError("Each sample must contain 'image' or 'image_full_path'.")
             loaded_images.append(Image.open(image_path).convert("RGB"))
@@ -265,8 +219,17 @@ class SFTAlignmentTrainer(Trainer):
     def wrap_t2i_prompt(self, captions, device=None):
         prompts = []
         for cap in captions:
+
+            conv = [
+                {
+                    "role": "<|User|>",
+                    "content": f"{cap}",
+                },
+                {"role": "<|Assistant|>", "content": ""},
+            ]
+
             sft_format = self.processing_class.apply_sft_template_for_multi_turn_prompts(
-                conversations=cap,
+                conversations=conv,
                 sft_format=self.processing_class.sft_format,
                 system_prompt="",
             )
@@ -281,9 +244,24 @@ class SFTAlignmentTrainer(Trainer):
         )
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
         return prompt_inputs, prompts
+    
+    @torch.inference_mode()
+    def get_image_gen_reps(self, model, device=None, images=None):
+
+        pixel_values = torch.stack([VQ_TRANSFORM(img) for img in images]).to(
+            device=device, dtype=torch.bfloat16
+        )
+        quant, _, info = model.gen_vision_model.encode(pixel_values)
+
+        X_image = quant.flatten(2).transpose(1, 2).contiguous()  # [B, N, D_vq]
+
+        gt_ids = info[-1].reshape(
+                            X_image.shape[0], -1)
+
+        return X_image, gt_ids
 
     @torch.inference_mode()
-    def get_i2t_caption(self, device=None, images=None):
+    def get_i2t_t2i_inputs(self, device=None, images=None):
 
         task_instruct = "Describe the main content of the image in one sentence."
         _prompts, _images = [], []
@@ -320,188 +298,77 @@ class SFTAlignmentTrainer(Trainer):
 
         gen_captions = [fix_janus_text(cap) for cap in gen_captions]
 
-        return gen_captions
+        "this is the t2i input token IDs, which are used to autoregressively generate image tokens. This will be the student."
+        t2i_inputs, _ = self.wrap_t2i_prompt(gen_captions, device=device)
 
-    def _generate_and_score_completions(self, inputs):
+        return t2i_inputs
+    
 
+    def get_teacher_image_logits(self, model, gt_ids, device=None):
+        boi_id = self.processing_class.image_start_id
+        boi_ids = torch.full((gt_ids.shape[0], 1), boi_id, device=device, dtype=torch.long)
+        boi_mask = torch.ones((gt_ids.shape[0], 1), device=device, dtype=torch.long)
 
-        device = self.accelerator.device
-
-        print(inputs)
-
-        loaded_images = self.load_batch_images(inputs)
-
-
-        i2t_captions = self.get_i2t_caption(device=device, images=loaded_images)
-
-        print(i2t_captions)
-
-
-        # Prepare t2i prompt inputs
-        t2i_prompt_inputs, t2i_prompts = self.wrap_t2i_prompt(i2t_captions, device)
-        t2i_prompt_ids = t2i_prompt_inputs["input_ids"]
-        t2i_prompt_mask = t2i_prompt_inputs["attention_mask"]
-        t2i_prompts = [
-            pp.strip('<|User|>:').strip('<|Assistant|>:<begin_of_image>').strip()
-            for pp in t2i_prompts
-        ]
-        if self.max_prompt_length is not None:
-            t2i_prompt_ids = t2i_prompt_ids[:, -self.max_prompt_length:]
-            t2i_prompt_mask = t2i_prompt_mask[:, -self.max_prompt_length:]
-
-        t2i_input_dict = {"input_ids": t2i_prompt_ids, "attention_mask": t2i_prompt_mask}
-
-        print(t2i_input_dict)
-
-        print(EXIT)
-
-        # === Generate completion ===
-        with unwrap_model_for_generation(self.model_wrapped, self.accelerator) as unwrapped_model:
-            t2i_completion_ids, t2i_completions = unwrapped_model.t2i_generate_parallel(
-                input_ids=t2i_prompt_ids, attention_mask=t2i_prompt_mask,
-                **self.t2i_generation_kwargs
-            )
-
-        t2i_prompt_ids = t2i_prompt_ids.repeat_interleave(self.num_generations, dim=0)
-        t2i_prompt_mask = t2i_prompt_mask.repeat_interleave(self.num_generations, dim=0)
-        t2i_completion_mask = torch.ones_like(t2i_completion_ids).int()
-        t2i_logits_to_keep = t2i_completion_ids.size(1)
-
-        # Old per-token logps (only needed when num_iterations > 1)
-        with torch.inference_mode():
-            if self.num_iterations > 1:
-                t2i_old_per_token_logps = self._get_per_token_logps(
-                    self.model,
-                    t2i_inputs_ids=t2i_prompt_ids,
-                    t2i_attention_mask=t2i_prompt_mask,
-                    t2i_discrete_img_ids=t2i_completion_ids,
-                    t2i_logits_to_keep=t2i_logits_to_keep,
-                )
-            else:
-                t2i_old_per_token_logps = None
-
-        # === Compute rewards ===
-        t2i_prompts = [pp for pp in t2i_prompts for _ in range(self.num_generations)]
-        batch_images = [img for img in loaded_images for _ in range(self.num_generations)]
-
-        t2i_rewards_per_func = torch.zeros(
-            len(t2i_prompts), len(self.t2i_reward_funcs), device=device)
-        for i, reward_func in enumerate(self.t2i_reward_funcs):
-            if "t2i_CycleConsistency" in reward_func.__name__:
-                reward_kwargs = {"image": batch_images}
-                output_reward_func = reward_func(
-                    completions=t2i_completions, prompts=t2i_prompts,
-                    mmgpt=self.model, processing_class=self.processing_class,
-                    **reward_kwargs
-                )
-            elif "t2i_match" in reward_func.__name__:
-                output_reward_func = reward_func(
-                    completions=t2i_completions, prompts=t2i_prompts,
-                    mmgpt=self.model, processing_class=self.processing_class,
-                )
-            else:
-                raise ValueError(f"Unknown reward function: {reward_func}")
-
-            output_reward_func = [
-                reward if reward is not None else torch.nan for reward in output_reward_func
-            ]
-            t2i_rewards_per_func[:, i] = torch.tensor(
-                output_reward_func, dtype=torch.float32, device=device)
-
-        t2i_rewards_per_func = gather(t2i_rewards_per_func)
-        t2i_rewards = (t2i_rewards_per_func * self.t2i_reward_weights.to(
-            device).unsqueeze(0)).nansum(dim=1)
-
-        # === Grouped advantages ===
-        t2i_mean_grouped_rewards = t2i_rewards.view(-1, self.num_generations).mean(dim=1)
-        t2i_std_grouped_rewards = t2i_rewards.view(-1, self.num_generations).std(dim=1)
-        t2i_mean_grouped_rewards = t2i_mean_grouped_rewards.repeat_interleave(
-            self.num_generations, dim=0)
-        t2i_std_grouped_rewards = t2i_std_grouped_rewards.repeat_interleave(
-            self.num_generations, dim=0)
-
-        t2i_advantages = (t2i_rewards - t2i_mean_grouped_rewards) / (
-                t2i_std_grouped_rewards + 1e-4)
-        process_slice = slice(
-            self.accelerator.process_index * len(t2i_prompts),
-            (self.accelerator.process_index + 1) * len(t2i_prompts),
+        teacher_out = model(
+            t2i_input_ids=boi_ids,
+            t2i_attention_mask=boi_mask,
+            t2i_discrete_img_ids=gt_ids,
+            t2i_logits_to_keep=gt_ids.shape[1],
+            task="generation",
         )
-        t2i_advantages = t2i_advantages[process_slice]
+        teacher_logits = teacher_out.logits  # [B, N, V_image]
+        return teacher_logits
 
-        self._metrics["reward_t2i"].append(t2i_mean_grouped_rewards.mean().item())
-
-        for i, rf_name in enumerate([rf.__name__ for rf in self.t2i_reward_funcs]):
-            mean_rewards = torch.nanmean(t2i_rewards_per_func[:, i]).item()
-            self._metrics[f"rewards/{rf_name}/mean"].append(mean_rewards)
-
-        return {
-            "t2i_inputs_ids": t2i_prompt_ids,
-            "t2i_attention_mask": t2i_prompt_mask,
-            "t2i_discrete_img_ids": t2i_completion_ids,
-            "t2i_completion_mask": t2i_completion_mask,
-            "t2i_old_per_token_logps": t2i_old_per_token_logps,
-            "t2i_advantages": t2i_advantages,
-        }
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        t2i_logits_to_keep = inputs["t2i_completion_mask"].size(1)
 
-        t2i_per_token_logps = self._get_per_token_logps(
-            model,
-            t2i_inputs_ids=inputs["t2i_inputs_ids"],
-            t2i_attention_mask=inputs["t2i_attention_mask"],
-            t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
-            t2i_logits_to_keep=t2i_logits_to_keep,
-        )
+        device = self.accelerator.device
+        # Unwrap DDP/Accelerate wrappers for direct attribute access; use `model` for the
+        # forward call itself so DDP gradient sync still happens.
+        unwrapped = self.accelerator.unwrap_model(model)
 
-        if self.beta != 0.0:
-            with torch.inference_mode():
-                if self.ref_model is not None:
-                    t2i_ref_per_token_logps = self._get_per_token_logps(
-                        self.ref_model,
-                        t2i_inputs_ids=inputs["t2i_inputs_ids"],
-                        t2i_attention_mask=inputs["t2i_attention_mask"],
-                        t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
-                        t2i_logits_to_keep=t2i_logits_to_keep,
-                    )
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        t2i_ref_per_token_logps = self._get_per_token_logps(
-                            self.model,
-                            t2i_inputs_ids=inputs["t2i_inputs_ids"],
-                            t2i_attention_mask=inputs["t2i_attention_mask"],
-                            t2i_discrete_img_ids=inputs["t2i_discrete_img_ids"],
-                            t2i_logits_to_keep=t2i_logits_to_keep,
-                        )
-            t2i_per_token_kl = (
-                    torch.exp(t2i_ref_per_token_logps - t2i_per_token_logps) - (
-                        t2i_ref_per_token_logps - t2i_per_token_logps) - 1
-            )
+        with torch.inference_mode():
+            X_image, gt_ids = self.get_image_gen_reps(unwrapped, device=device, images=inputs["images"])
 
-        t2i_completion_mask = inputs["t2i_completion_mask"]
+        B, N, _ = X_image.shape
 
-        if inputs["t2i_old_per_token_logps"] is None:
-            t2i_old_per_token_logps = t2i_per_token_logps.detach()
-        else:
-            t2i_old_per_token_logps = inputs["t2i_old_per_token_logps"]
+        # t2i student -> 85% mask
+        text_embeds = unwrapped.language_model.get_input_embeddings()(
+            inputs["t2i_input_ids"]
+        )                                                          # [B, L, D]
 
-        t2i_advantages = inputs["t2i_advantages"]
-        t2i_per_token_loss = t2i_advantages.unsqueeze(1) * (
-                t2i_per_token_logps - t2i_old_per_token_logps
-        ).exp()
+        # injecting some masking
+        gt_img_embeds = unwrapped.prepare_gen_img_embeds(gt_ids)   # [B, N, D]
 
-        if self.beta != 0.0:
-            t2i_per_token_loss = -(t2i_per_token_loss - self.beta * t2i_per_token_kl)
-            t2i_mean_kl = ((t2i_per_token_kl * t2i_completion_mask).sum(
-                dim=1) / t2i_completion_mask.sum(dim=1)).mean()
-            self._metrics["kl_t2i"].append(
-                self.accelerator.gather_for_metrics(t2i_mean_kl).mean().item()
-            )
-        else:
-            t2i_per_token_loss = -t2i_per_token_loss
+        # random mask: sample one ratio per step in [0.7, 1.0]
+        mask_ratio = torch.empty(1, device=device).uniform_(0.7, 1.0).item()
+        keep = (torch.rand(B, N, device=device) >= mask_ratio).unsqueeze(-1)  # [B, N, 1] bool
+        mask_token = unwrapped.mask_token_embed.expand(B, N, -1)              # [B, N, D]
+        masked_img_embeds = torch.where(keep, gt_img_embeds, mask_token)      # [B, N, D]
+        self._metrics["mask_ratio"].append(mask_ratio)
 
-        loss_t2i = (t2i_per_token_loss * t2i_completion_mask).sum() / t2i_completion_mask.sum().clamp(min=1.0)
-        return loss_t2i
+        student_inputs_embeds = torch.cat([text_embeds, masked_img_embeds], dim=1)  # [B, L+N, D]
+        img_attn_mask = torch.ones(B, N, device=device, dtype=torch.long)
+        full_attn_mask = torch.cat([inputs["t2i_attention_mask"], img_attn_mask], dim=1)
+
+        student_gen_head_logits = model(
+            t2i_inputs_embeds=student_inputs_embeds,
+            t2i_attention_mask=full_attn_mask,
+            t2i_logits_to_keep=N,
+            task="generation",
+        ).logits
+
+        codebook = unwrapped.gen_vision_model.quantize.embedding.weight  # [V, D_vq]
+
+        probs = F.softmax(student_gen_head_logits.float(), dim=-1)       # [B, N, V]
+        X_text = (probs @ codebook.float()).to(X_image.dtype)            # [B, N, D_vq]
+
+        per_position_sq = ((X_text - X_image) ** 2).sum(dim=-1)          # [B, N]
+        loss = per_position_sq.mean()                                    # scalar
+
+        self._metrics["loss_align"].append(loss.item())
+
+        return loss
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         step_start = time.perf_counter()
@@ -510,7 +377,28 @@ class SFTAlignmentTrainer(Trainer):
         return loss
 
     def _prepare_inputs(self, inputs):
-        return self._generate_and_score_completions(inputs)
+        device = self.accelerator.device
+        loaded_images = self.load_batch_images(inputs)
+
+        # vq_pixel_values = torch.stack([VQ_TRANSFORM(img) for img in loaded_images]).to(
+        #     device=device, dtype=torch.bfloat16
+        # )
+
+        t2i_inputs = self.get_i2t_t2i_inputs(device=device, images=loaded_images)
+        # gt_image_ids = self.get_gt_image_ids(device=device, images=loaded_images)
+
+        t2i_input_ids = t2i_inputs["input_ids"]
+        t2i_attention_mask = t2i_inputs["attention_mask"]
+        if self.max_prompt_length is not None:
+            t2i_input_ids = t2i_input_ids[:, -self.max_prompt_length:]
+            t2i_attention_mask = t2i_attention_mask[:, -self.max_prompt_length:]
+
+        return {
+            "t2i_input_ids": t2i_input_ids,
+            "t2i_attention_mask": t2i_attention_mask,
+            # "t2i_discrete_img_ids": gt_image_ids,
+            "images": loaded_images,  # placeholder for potential future use
+        }
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         metrics = {key: sum(val) / len(val) for key, val in self._metrics.items()}
