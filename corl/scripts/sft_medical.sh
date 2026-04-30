@@ -1,13 +1,15 @@
 #!/bin/bash
 
-# source /projects/u6gd/umar/miniconda3/etc/profile.d/conda.sh
-# source /projects/u6gd/umar/env.sh
-
-source /vol/research/fmodel_medical/people/umar/miniconda3/etc/profile.d/conda.sh
-
-# cd /projects/u6gd/umar/codes/ULM-R1
-
-cd /vol/research/fmodel_medical/people/umar/MLMM/ULM-R1
+if [[ "$(hostname)" == "ulws072" ]]; then
+    source /vol/research/fmodel_medical/people/umar/miniconda3/etc/profile.d/conda.sh
+    cd /vol/research/fmodel_medical/people/umar/MLMM/ULM-R1
+    DATA_DIR=/vol/research/fmodel_medical/people/umar/datasets/PubMedVision
+else
+    source /projects/u6gd/umar/miniconda3/etc/profile.d/conda.sh
+    source /projects/u6gd/umar/env.sh
+    cd /projects/u6gd/umar/codes/ULM-R1
+    DATA_DIR=/projects/u6gd/datasets/PubMedVision
+fi
 
 
 CUDA_VISIBLE_DEVICES=0
@@ -22,8 +24,6 @@ export PYTHONPATH="$(pwd):${PYTHONPATH}"
 
 # *****************  ***************** #
 CKPT_PATH=deepseek-ai/Janus-Pro-1B
-# DATA_DIR=/projects/u6gd/datasets/PubMedVision
-DATA_DIR=/vol/research/fmodel_medical/people/umar/datasets/PubMedVision
 DATASET_NAME=PubMedVision_Original_Caption.json
 
 SAVE_DIR=./results/JanusPro-1B-CoRL-AlignmentSFT
