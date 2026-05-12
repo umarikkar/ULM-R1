@@ -31,12 +31,13 @@ DEFAULT_CHECKPOINTS = [
 ]
 
 
-PARQUET_PATH = "/projects/u6gd/umar/codes/ULM-R1/data/t2i_midlevel_llama.parquet"
-IMAGE_ROOT = "/projects/u6gd/datasets/PubMedVision/images/"
+
+# PARQUET_PATH = "/projects/u6gd/umar/codes/ULM-R1/data/t2i_midlevel_llama.parquet"
+# IMAGE_ROOT = "/projects/u6gd/datasets/PubMedVision/images/"
 
 
-# PARQUET_PATH = "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/data/t2i_midlevel_llama.parquet"
-# IMAGE_ROOT = "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision/images/"
+PARQUET_PATH = "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/data/t2i_midlevel_llama.parquet"
+IMAGE_ROOT = "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision/images/"
 
 
 

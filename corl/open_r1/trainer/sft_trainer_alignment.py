@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# T2I-only variant of grpo_trainer_unified.py — all mm2t (VL QA) computation removed.
-# The model forward is invoked with task="generation" instead of task="unify".
+# T2I-only AR-CE variant: student is teacher-forced on its OWN AR rollout
+# (in inference_mode, no grad), then cross-entropy is taken against GT VQ ids.
 
 import re
 import time
@@ -41,7 +41,6 @@ import torchvision.transforms as T
 
 from trl.import_utils import is_deepspeed_available
 from trl import ScriptArguments, SFTConfig
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 if is_deepspeed_available():
     import deepspeed  # noqa: F401
@@ -56,6 +55,8 @@ VQ_TRANSFORM = T.Compose([
     T.ToTensor(),
     T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
 ])
+
+N_IMAGE_TOKENS = 196
 
 
 def fix_janus_text(out_caption):
@@ -172,18 +173,6 @@ class SFTAlignmentTrainer(Trainer):
         set_seed(args.seed, device_specific=True)
         self.model_accepts_loss_kwargs = False
 
-        self.use_reconstruction_loss = getattr(task_args, 'use_reconstruction_loss', False)
-        self.lpips_weight = getattr(task_args, 'lpips_weight', 1.0)
-        if self.use_reconstruction_loss:
-            self.lpips_metric = LearnedPerceptualImagePatchSimilarity(
-                net_type='vgg', normalize=False  # decoder output is in [-1, 1]
-            ).to(self.accelerator.device)
-            self.lpips_metric.eval()
-            for p in self.lpips_metric.parameters():
-                p.requires_grad = False
-        else:
-            self.lpips_metric = None
-
 
     @staticmethod
     def init_trainable_parameters(model):
@@ -209,9 +198,6 @@ class SFTAlignmentTrainer(Trainer):
             param.requires_grad = True
         for param in model.gen_aligner.parameters():
             param.requires_grad = True
-
-        # learnable mask query token (defined on the model itself; flag it trainable)
-        model.mask_token_embed.requires_grad = True
 
         return model
 
@@ -332,87 +318,86 @@ class SFTAlignmentTrainer(Trainer):
         return teacher_logits
 
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    @torch.inference_mode()
+    def ar_rollout_student_ids(self, model, t2i_input_ids, t2i_attention_mask):
+        """Autoregressively sample N image tokens from text+BOI using current weights.
 
+        Mirrors generate_image() in evaluate_checkpoints.py (no CFG — the SFT has
+        no unconditional branch). Returned ids are used as the *student's own*
+        teacher-forcing context for the grad-enabled forward.
+        """
+        unwrapped = self.accelerator.unwrap_model(model)
+        device = t2i_input_ids.device
+        B = t2i_input_ids.shape[0]
+        N = N_IMAGE_TOKENS
+
+        inputs_embeds = unwrapped.language_model.get_input_embeddings()(t2i_input_ids)
+        attn = t2i_attention_mask
+
+        generated_ids = torch.zeros((B, N), dtype=torch.long, device=device)
+        outputs = None
+        for i in range(N):
+            outputs = unwrapped.language_model.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn,
+                use_cache=True,
+                past_key_values=outputs.past_key_values if i != 0 else None,
+            )
+            hidden = outputs.last_hidden_state[:, -1, :]
+            logits = unwrapped.gen_head(hidden)                                # [B, V_img]
+            probs = F.softmax(logits.float() / max(self.temperature, 1e-6), dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)   # [B]
+            generated_ids[:, i] = next_token
+
+            inputs_embeds = unwrapped.prepare_gen_img_embeds(next_token).unsqueeze(1)
+            attn = torch.cat(
+                [attn, torch.ones(B, 1, dtype=attn.dtype, device=device)], dim=1
+            )
+
+        return generated_ids
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         device = self.accelerator.device
-        # Unwrap DDP/Accelerate wrappers for direct attribute access; use `model` for the
-        # forward call itself so DDP gradient sync still happens.
         unwrapped = self.accelerator.unwrap_model(model)
 
+        # GT image -> VQ token ids (supervision targets).
         with torch.inference_mode():
-            X_image, gt_ids, spatial_shape = self.get_image_gen_reps(unwrapped, device=device, images=inputs["images"])
+            _, gt_ids, _ = self.get_image_gen_reps(
+                unwrapped, device=device, images=inputs["images"]
+            )
 
-        B, N, _ = X_image.shape
+            # AR rollout under current weights -> student's own image-token context.
+            student_ids = self.ar_rollout_student_ids(
+                model, inputs["t2i_input_ids"], inputs["t2i_attention_mask"]
+            )
 
-        # t2i student -> 85% mask
-        text_embeds = unwrapped.language_model.get_input_embeddings()(
-            inputs["t2i_input_ids"]
-        )                                                          # [B, L, D]
+        # Need a writable copy: tensors from inference_mode can't be used in a
+        # grad-enabled forward without cloning out of inference state.
+        student_ids = student_ids.clone()
+        gt_ids = gt_ids.clone()
 
-        # injecting some masking
-        gt_img_embeds = unwrapped.prepare_gen_img_embeds(gt_ids)   # [B, N, D]
-
-        # random mask: sample one ratio per step in [0.7, 1.0]
-        mask_ratio = torch.empty(1, device=device).uniform_(0.7, 1.0).item()
-        keep = (torch.rand(B, N, device=device) >= mask_ratio).unsqueeze(-1)  # [B, N, 1] bool
-        mask_token = unwrapped.mask_token_embed.expand(B, N, -1)              # [B, N, D]
-        masked_img_embeds = torch.where(keep, gt_img_embeds, mask_token)      # [B, N, D]
-        self._metrics["mask_ratio"].append(mask_ratio)
-
-        student_inputs_embeds = torch.cat([text_embeds, masked_img_embeds], dim=1)  # [B, L+N, D]
-        img_attn_mask = torch.ones(B, N, device=device, dtype=torch.long)
-        full_attn_mask = torch.cat([inputs["t2i_attention_mask"], img_attn_mask], dim=1)
-
-        student_gen_head_logits = model(
-            t2i_inputs_embeds=student_inputs_embeds,
-            t2i_attention_mask=full_attn_mask,
-            t2i_logits_to_keep=N,
+        # Student forward (grad on): text prompt + student's own AR ids as
+        # teacher-forcing context, read logits at the N image positions.
+        student_logits = model(
+            t2i_input_ids=inputs["t2i_input_ids"],
+            t2i_attention_mask=inputs["t2i_attention_mask"],
+            t2i_discrete_img_ids=student_ids,
+            t2i_logits_to_keep=student_ids.shape[1],
             task="generation",
-        ).logits
+        ).logits                                                                # [B, N, V_img]
 
-        codebook = unwrapped.gen_vision_model.quantize.embedding.weight  # [V, D_vq]
+        B, N, V = student_logits.shape
+        loss = F.cross_entropy(
+            student_logits.reshape(-1, V).float(), gt_ids.reshape(-1)
+        )
 
-        probs = F.softmax(student_gen_head_logits.float(), dim=-1)       # [B, N, V]
-        X_text = (probs @ codebook.float()).to(X_image.dtype)            # [B, N, D_vq]
-
-        per_position_sq = ((X_text - X_image) ** 2).sum(dim=-1)          # [B, N]
-        loss = per_position_sq.mean()                                    # scalar
-
-        self._metrics["loss_align"].append(loss.item())
-
-        if self.lpips_metric is not None:
-            H_vq, W_vq = spatial_shape
-            D_vq = X_image.shape[-1]
-
-            # Straight-through: pick the nearest codebook entry per position so the
-            # decoder always receives in-distribution hard-quantized inputs (avoids
-            # NaN from GroupNorm collapse on soft OOD latents in bfloat16).
-            # Gradients flow via the (X_text - X_text.detach()) residual, identical
-            # in value to zero but with dL/dX_text = dL/dX_decode.
-            hard_ids = student_gen_head_logits.detach().argmax(dim=-1)   # [B, N]
-            X_hard = codebook[hard_ids].to(X_text.dtype)                 # [B, N, D_vq], no grad
-            X_decode = X_hard + (X_text - X_text.detach())               # straight-through
-
-            X_decode_spatial = (
-                X_decode.reshape(B, H_vq, W_vq, D_vq)
-                        .permute(0, 3, 1, 2)
-                        .contiguous()
-            )                                                             # [B, D_vq, H_vq, W_vq]
-            student_pixels = unwrapped.gen_vision_model.decode(X_decode_spatial)
-            student_pixels = student_pixels.clamp(-1., 1.).float()       # [B, 3, H_px, W_px]
-
-            with torch.no_grad():
-                X_image_spatial = (
-                    X_image.reshape(B, H_vq, W_vq, D_vq)
-                           .permute(0, 3, 1, 2)
-                           .contiguous()
-                )                                                         # [B, D_vq, H_vq, W_vq]
-                gt_pixels = unwrapped.gen_vision_model.decode(X_image_spatial)
-                gt_pixels = gt_pixels.clamp(-1., 1.).float()             # [B, 3, H_px, W_px]
-
-            lpips_val = self.lpips_metric(student_pixels, gt_pixels)
-            self._metrics["loss_lpips"].append(lpips_val.item())
-            loss = loss + self.lpips_weight * lpips_val
+        self._metrics["loss_ce"].append(loss.item())
+        with torch.no_grad():
+            pred = student_logits.argmax(dim=-1)
+            self._metrics["token_acc"].append((pred == gt_ids).float().mean().item())
+            self._metrics["rollout_gt_match"].append(
+                (student_ids == gt_ids).float().mean().item()
+            )
 
         return loss
 
