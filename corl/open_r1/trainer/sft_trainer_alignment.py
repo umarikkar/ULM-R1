@@ -41,6 +41,7 @@ import torchvision.transforms as T
 
 from trl.import_utils import is_deepspeed_available
 from trl import ScriptArguments, SFTConfig
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 if is_deepspeed_available():
     import deepspeed  # noqa: F401
@@ -171,6 +172,18 @@ class SFTAlignmentTrainer(Trainer):
         set_seed(args.seed, device_specific=True)
         self.model_accepts_loss_kwargs = False
 
+        self.use_reconstruction_loss = getattr(task_args, 'use_reconstruction_loss', False)
+        self.lpips_weight = getattr(task_args, 'lpips_weight', 1.0)
+        if self.use_reconstruction_loss:
+            self.lpips_metric = LearnedPerceptualImagePatchSimilarity(
+                net_type='vgg', normalize=False  # decoder output is in [-1, 1]
+            ).to(self.accelerator.device)
+            self.lpips_metric.eval()
+            for p in self.lpips_metric.parameters():
+                p.requires_grad = False
+        else:
+            self.lpips_metric = None
+
 
     @staticmethod
     def init_trainable_parameters(model):
@@ -253,12 +266,11 @@ class SFTAlignmentTrainer(Trainer):
         )
         quant, _, info = model.gen_vision_model.encode(pixel_values)
 
-        X_image = quant.flatten(2).transpose(1, 2).contiguous()  # [B, N, D_vq]
+        spatial_shape = quant.shape[2:]                          # (H_vq, W_vq)
+        X_image = quant.flatten(2).transpose(1, 2).contiguous() # [B, N, D_vq]
+        gt_ids = info[-1].reshape(X_image.shape[0], -1)
 
-        gt_ids = info[-1].reshape(
-                            X_image.shape[0], -1)
-
-        return X_image, gt_ids
+        return X_image, gt_ids, spatial_shape
 
     @torch.inference_mode()
     def get_i2t_t2i_inputs(self, device=None, images=None):
@@ -328,7 +340,7 @@ class SFTAlignmentTrainer(Trainer):
         unwrapped = self.accelerator.unwrap_model(model)
 
         with torch.inference_mode():
-            X_image, gt_ids = self.get_image_gen_reps(unwrapped, device=device, images=inputs["images"])
+            X_image, gt_ids, spatial_shape = self.get_image_gen_reps(unwrapped, device=device, images=inputs["images"])
 
         B, N, _ = X_image.shape
 
@@ -367,6 +379,40 @@ class SFTAlignmentTrainer(Trainer):
         loss = per_position_sq.mean()                                    # scalar
 
         self._metrics["loss_align"].append(loss.item())
+
+        if self.lpips_metric is not None:
+            H_vq, W_vq = spatial_shape
+            D_vq = X_image.shape[-1]
+
+            # Straight-through: pick the nearest codebook entry per position so the
+            # decoder always receives in-distribution hard-quantized inputs (avoids
+            # NaN from GroupNorm collapse on soft OOD latents in bfloat16).
+            # Gradients flow via the (X_text - X_text.detach()) residual, identical
+            # in value to zero but with dL/dX_text = dL/dX_decode.
+            hard_ids = student_gen_head_logits.detach().argmax(dim=-1)   # [B, N]
+            X_hard = codebook[hard_ids].to(X_text.dtype)                 # [B, N, D_vq], no grad
+            X_decode = X_hard + (X_text - X_text.detach())               # straight-through
+
+            X_decode_spatial = (
+                X_decode.reshape(B, H_vq, W_vq, D_vq)
+                        .permute(0, 3, 1, 2)
+                        .contiguous()
+            )                                                             # [B, D_vq, H_vq, W_vq]
+            student_pixels = unwrapped.gen_vision_model.decode(X_decode_spatial)
+            student_pixels = student_pixels.clamp(-1., 1.).float()       # [B, 3, H_px, W_px]
+
+            with torch.no_grad():
+                X_image_spatial = (
+                    X_image.reshape(B, H_vq, W_vq, D_vq)
+                           .permute(0, 3, 1, 2)
+                           .contiguous()
+                )                                                         # [B, D_vq, H_vq, W_vq]
+                gt_pixels = unwrapped.gen_vision_model.decode(X_image_spatial)
+                gt_pixels = gt_pixels.clamp(-1., 1.).float()             # [B, 3, H_px, W_px]
+
+            lpips_val = self.lpips_metric(student_pixels, gt_pixels)
+            self._metrics["loss_lpips"].append(lpips_val.item())
+            loss = loss + self.lpips_weight * lpips_val
 
         return loss
 

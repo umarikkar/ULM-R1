@@ -93,8 +93,8 @@ if __name__ == "__main__":
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
     DATA_PATH = "./PubMedVision_Original_Caption.json" 
-    SAVE_DIR = "./results/JanusPro-1B-CoRL-Uniified"
-    SAVE_PATH = f"{SAVE_DIR}/AlignmentSFT"
+    SAVE_DIR = "./results/DEBUGGING"
+    SAVE_PATH = f"{SAVE_DIR}/AlignmentSFT_LPIPS"
 
     os.makedirs(SAVE_PATH, exist_ok=True)
 
@@ -107,6 +107,8 @@ if __name__ == "__main__":
         max_prompt_length=1024,
         max_completion_length=512,
         alignment_losses=["masking", "hidden"],
+        use_reconstruction_loss=True,  # set True to add pixel-space LPIPS on top of latent MSE
+        lpips_weight=1.0,
     )
 
     # ---- Training arguments ---- #

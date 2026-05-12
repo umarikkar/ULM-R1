@@ -145,4 +145,5 @@ TEST_INPUT.txt
 scp_bundle.tar
 
 # local core dump / artifact file
+./core
 /core

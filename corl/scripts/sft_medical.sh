@@ -12,7 +12,7 @@ else
 fi
 
 
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=0,1,2,3
 
 conda activate corl
 
@@ -26,23 +26,25 @@ export PYTHONPATH="$(pwd):${PYTHONPATH}"
 CKPT_PATH=deepseek-ai/Janus-Pro-1B
 DATASET_NAME=PubMedVision_Original_Caption.json
 
-SAVE_DIR=./results/JanusPro-1B-CoRL-AlignmentSFT
-SAVE_PATH=${SAVE_DIR}/AlignmentSFT
+SAVE_DIR=./results/JanusPro-1B-CoRL-AlignmentSFT_v3
+SAVE_PATH=${SAVE_DIR}/AlignmentSFT-LPIPS
 mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 
-learning_rate=4e-6
+learning_rate=5e-5
 num_train_epochs=1
 
 max_prompt_length=1024
 max_completion_length=512
 
-per_device_train_batch_size=1
-gradient_accumulation_steps=4
-max_samples=50000
+per_device_train_batch_size=16
+gradient_accumulation_steps=1
 lazy_image_loading=True
 
-torchrun --nproc_per_node="1" \
+use_reconstruction_loss=True
+lpips_weight=1.0
+
+torchrun --nproc_per_node="4" \
     --nnodes="1" \
     --node_rank="0" \
     --master_addr="127.0.0.1" \
@@ -53,9 +55,10 @@ torchrun --nproc_per_node="1" \
     --dataset_name ${DATASET_NAME} \
     --data_dir ${DATA_DIR} \
     --lazy_image_loading ${lazy_image_loading} \
-    --max_samples ${max_samples} \
     --max_prompt_length ${max_prompt_length} \
     --max_completion_length ${max_completion_length} \
+    --use_reconstruction_loss ${use_reconstruction_loss} \
+    --lpips_weight ${lpips_weight} \
     --report_to wandb \
     --logging_steps 1 \
     --remove_unused_columns false \

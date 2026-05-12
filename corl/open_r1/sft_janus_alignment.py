@@ -141,6 +141,15 @@ class SFTScriptArguments(ScriptArguments):
         metadata={"help": "Temperature for sampling during training."},
     )
 
+    use_reconstruction_loss: bool = field(
+        default=False,
+        metadata={"help": "If True, add a pixel-space LPIPS reconstruction loss on top of the latent MSE."},
+    )
+    lpips_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight applied to the LPIPS term: total_loss = loss_align + lpips_weight * loss_lpips."},
+    )
+
 
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()

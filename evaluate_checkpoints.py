@@ -24,13 +24,21 @@ import numpy as np
 
 
 DEFAULT_CHECKPOINTS = [
-    "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/results/JanusPro-1B-CoRL-Uniified/AlignmentSFT/checkpoint-2000",
+    "/projects/u6gd/umar/codes/ULM-R1/results/JanusPro-1B-CoRL-AlignmentSFT_v2/AlignmentSFT/checkpoint-8600",
+    "/projects/u6gd/umar/codes/ULM-R1/results/JanusPro-1B-CoRL-AlignmentSFT_v3/AlignmentSFT/checkpoint-9000",
     # "/projects/u6gd/umar/codes/ULM-R1/JanusPro-1B-CoRL-Uniified/"
     # "RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16/checkpoint-800",
 ]
 
-PARQUET_PATH = "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/data/t2i_midlevel_llama.parquet"
-IMAGE_ROOT = "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision/images/"
+
+PARQUET_PATH = "/projects/u6gd/umar/codes/ULM-R1/data/t2i_midlevel_llama.parquet"
+IMAGE_ROOT = "/projects/u6gd/datasets/PubMedVision/images/"
+
+
+# PARQUET_PATH = "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/data/t2i_midlevel_llama.parquet"
+# IMAGE_ROOT = "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision/images/"
+
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=str,
-        default="/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/checkpoint_evals",
+        default="./checkpoint_evals",
         help="Root output directory. A subfolder is created per checkpoint.",
     )
     return parser.parse_args()

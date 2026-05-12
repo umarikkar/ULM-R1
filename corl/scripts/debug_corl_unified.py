@@ -89,7 +89,7 @@ if __name__ == "__main__":
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
     DATA_PATH = "data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
-    SAVE_DIR = "./JanusPro-1B-CoRL-Uniified"
+    SAVE_DIR = "./DEBUGGING"
     SAVE_PATH = f"{SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16"
 
     os.makedirs(SAVE_PATH, exist_ok=True)
