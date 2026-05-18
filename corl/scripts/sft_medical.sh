@@ -26,12 +26,12 @@ export PYTHONPATH="$(pwd):${PYTHONPATH}"
 CKPT_PATH=deepseek-ai/Janus-Pro-1B
 DATASET_NAME=PubMedVision_Original_Caption.json
 
-SAVE_DIR=./results/JanusPro-1B-CoRL-AlignmentSFT_v3
-SAVE_PATH=${SAVE_DIR}/AlignmentSFT-LPIPS
+SAVE_DIR=./results/JanusPro-1B-AlignmentSFT
+SAVE_PATH=${SAVE_DIR}/AR_Loss_highLR
 mkdir -p $SAVE_PATH
 cp $0 $SAVE_PATH/run.sh
 
-learning_rate=5e-5
+learning_rate=1e-4
 num_train_epochs=1
 
 max_prompt_length=1024
@@ -41,7 +41,7 @@ per_device_train_batch_size=16
 gradient_accumulation_steps=1
 lazy_image_loading=True
 
-use_reconstruction_loss=True
+use_reconstruction_loss=False
 lpips_weight=1.0
 
 torchrun --nproc_per_node="4" \
