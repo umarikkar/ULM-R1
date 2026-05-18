@@ -109,6 +109,9 @@ if __name__ == "__main__":
         alignment_losses=["masking", "hidden"],
         use_reconstruction_loss=False,  # set True to add pixel-space LPIPS on top of latent MSE
         lpips_weight=1.0,
+        prompt_dropout_prob=0.1,
+        eval_image_freq=5,
+        eval_image_num=2,
     )
 
     # ---- Training arguments ---- #
@@ -116,9 +119,10 @@ if __name__ == "__main__":
         output_dir=SAVE_PATH,
         report_to="none",
         logging_steps=1,
-        per_device_train_batch_size=2,
+        per_device_train_batch_size=1,
         remove_unused_columns=False,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=1,
+        max_steps=12,
         num_train_epochs=1,
         learning_rate=4e-5,
         bf16=True,
@@ -134,7 +138,7 @@ if __name__ == "__main__":
         torch_dtype="bfloat16",
     )
 
-    main(script_args, training_args, model_args, max_samples=50000)
+    main(script_args, training_args, model_args, max_samples=64)
 
     # # Print memory every N seconds while debugging training.
     # monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))

@@ -24,8 +24,8 @@ import numpy as np
 
 
 DEFAULT_CHECKPOINTS = [
-    "/projects/u6gd/umar/codes/ULM-R1/results/JanusPro-1B-CoRL-AlignmentSFT_v2/AlignmentSFT/checkpoint-8600",
-    "/projects/u6gd/umar/codes/ULM-R1/results/JanusPro-1B-CoRL-AlignmentSFT_v3/AlignmentSFT/checkpoint-9000",
+    "results/results/JanusPro-1B-AlignmentSFT/AR_Loss/checkpoint-6400",
+    # "results/results/JanusPro-1B-AlignmentSFT/AR_Loss_highLR/checkpoint-5400",
     # "/projects/u6gd/umar/codes/ULM-R1/JanusPro-1B-CoRL-Uniified/"
     # "RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16/checkpoint-800",
 ]
@@ -75,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="./checkpoint_evals",
         help="Root output directory. A subfolder is created per checkpoint.",
+    )
+    parser.add_argument("--cfg", type=float, default=5.0, help="CFG weight for t2i.")
+    parser.add_argument("--temp", type=float, default=1.0, help="Sampling temperature for t2i.")
+    parser.add_argument(
+        "--run-tag", type=str, default=None,
+        help="Appended to per-checkpoint output dir name (default: cfg{X}_t{Y}).",
     )
     return parser.parse_args()
 
@@ -137,7 +143,139 @@ def generate_image(
     )
     dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
     dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
-    return dec  # (parallel_size, H, W, 3)
+    return dec, generated_tokens[0].detach().cpu().to(torch.long)  # imgs, tokens
+
+
+@torch.inference_mode()
+def encode_image_to_tokens(
+    mmgpt,
+    pil_image: Image.Image,
+    img_size: int = 384,
+    patch_size: int = 16,
+):
+    device = next(mmgpt.gen_vision_model.parameters()).device
+    dtype = next(mmgpt.gen_vision_model.parameters()).dtype
+
+    img = pil_image.convert("RGB").resize((img_size, img_size), Image.Resampling.BICUBIC)
+    arr = np.asarray(img).astype(np.float32) / 255.0
+    arr = arr * 2.0 - 1.0
+    x = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype)
+
+    _, _, info = mmgpt.gen_vision_model.encode(x)
+    indices = info[2].view(-1).to(torch.long).cpu()
+    return indices  # (img_size/patch_size)**2 tokens
+
+
+@torch.inference_mode()
+def decode_tokens_to_image(
+    mmgpt,
+    tokens: torch.Tensor,
+    img_size: int = 384,
+    patch_size: int = 16,
+) -> Image.Image:
+    device = next(mmgpt.gen_vision_model.parameters()).device
+    grid = img_size // patch_size
+    codes = tokens.view(1, -1).to(device=device, dtype=torch.int)
+    dec = mmgpt.gen_vision_model.decode_code(
+        codes, shape=[1, 8, grid, grid],
+    )
+    dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+    dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+    return Image.fromarray(dec[0])
+
+
+def token_stats(tokens: torch.Tensor, codebook_size: int = 16384) -> dict:
+    t = tokens.to(torch.long)
+    n = int(t.numel())
+    counts = torch.bincount(t, minlength=codebook_size).to(torch.float64)
+    nz = counts[counts > 0]
+    probs = nz / nz.sum()
+    entropy = float(-(probs * probs.log2()).sum())
+    sorted_counts, _ = torch.sort(counts, descending=True)
+    top1_frac = float(sorted_counts[0] / n)
+    top5_frac = float(sorted_counts[:5].sum() / n)
+    top10_frac = float(sorted_counts[:10].sum() / n)
+    unique = int((counts > 0).sum())
+    coverage = unique / codebook_size
+    perplexity = float(torch.exp(torch.tensor(entropy) * np.log(2)))
+    eff_usage = perplexity / codebook_size
+    # consecutive repetition rate
+    if n > 1:
+        repeat_rate = float((t[1:] == t[:-1]).float().mean())
+    else:
+        repeat_rate = 0.0
+    return {
+        "n": n,
+        "unique": unique,
+        "coverage": coverage,
+        "entropy_bits": entropy,
+        "perplexity": perplexity,
+        "eff_usage": eff_usage,
+        "top1_frac": top1_frac,
+        "top5_frac": top5_frac,
+        "top10_frac": top10_frac,
+        "repeat_rate": repeat_rate,
+        "counts": counts,
+    }
+
+
+def format_stats(name: str, s: dict) -> str:
+    return (
+        f"  [{name}] unique={s['unique']}/{s['n']} cov={s['coverage']*100:.2f}% "
+        f"H={s['entropy_bits']:.2f}b ppl={s['perplexity']:.1f} "
+        f"top1={s['top1_frac']*100:.1f}% top5={s['top5_frac']*100:.1f}% "
+        f"top10={s['top10_frac']*100:.1f}% repeat={s['repeat_rate']*100:.1f}%"
+    )
+
+
+def spatial_periodicity(tokens: torch.Tensor, grid: int = 24) -> dict:
+    """Detect tiling: how often whole rows / columns repeat in the 24x24 grid."""
+    if tokens.numel() != grid * grid:
+        return {"row_dup_rate": 0.0, "col_dup_rate": 0.0, "row_period": 0, "col_period": 0}
+    g = tokens.view(grid, grid).to(torch.long)
+    # fraction of rows identical to the row above
+    row_dup = float((g[1:] == g[:-1]).all(dim=1).float().mean())
+    col_dup = float((g[:, 1:] == g[:, :-1]).all(dim=0).float().mean())
+    # smallest period p where row[i] == row[i+p] for most i
+    def best_period(mat):
+        best_p, best_score = 0, 0.0
+        for p in range(1, grid):
+            score = float((mat[p:] == mat[:-p]).all(dim=1).float().mean())
+            if score > best_score:
+                best_score, best_p = score, p
+            if score > 0.9:
+                return p, score
+        return best_p, best_score
+    row_p, row_s = best_period(g)
+    col_p, col_s = best_period(g.t().contiguous())
+    return {
+        "row_dup_rate": row_dup,
+        "col_dup_rate": col_dup,
+        "row_period": row_p, "row_period_score": row_s,
+        "col_period": col_p, "col_period_score": col_s,
+    }
+
+
+def format_spatial(name: str, sp: dict) -> str:
+    return (
+        f"  [{name} spatial] row_dup={sp['row_dup_rate']*100:.1f}% "
+        f"col_dup={sp['col_dup_rate']*100:.1f}% "
+        f"row_period={sp['row_period']}(score={sp['row_period_score']:.2f}) "
+        f"col_period={sp['col_period']}(score={sp['col_period_score']:.2f})"
+    )
+
+
+def collapse_verdict(s: dict) -> str:
+    flags = []
+    if s["top1_frac"] > 0.20:
+        flags.append(f"top1>{s['top1_frac']*100:.0f}%")
+    if s["top10_frac"] > 0.50:
+        flags.append(f"top10>{s['top10_frac']*100:.0f}%")
+    if s["unique"] < 0.3 * s["n"]:
+        flags.append(f"low-unique({s['unique']}/{s['n']})")
+    if s["repeat_rate"] > 0.10:
+        flags.append(f"repeats={s['repeat_rate']*100:.0f}%")
+    return "COLLAPSED: " + ", ".join(flags) if flags else "ok"
 
 
 def resolve_device(device_arg: str) -> str:
@@ -225,21 +363,27 @@ def save_comparison_image(
     orig_img: Image.Image,
     regen_img: Image.Image,
     caption: str,
+    recon_img: Optional[Image.Image] = None,
+    title_override: Optional[str] = None,
 ):
     pad = 20
     gap = 20
 
-    target_h = max(orig_img.height, regen_img.height)
-    orig = resize_to_height(orig_img, target_h)
-    regen = resize_to_height(regen_img, target_h)
+    panels = [("Original", orig_img)]
+    if recon_img is not None:
+        panels.append(("VQ Recon (encode→decode)", recon_img))
+    panels.append(("T2I Generated", regen_img))
+
+    target_h = max(p[1].height for p in panels)
+    sized = [(name, resize_to_height(img, target_h)) for name, img in panels]
 
     font = ImageFont.load_default()
 
-    canvas_w = orig.width + regen.width + pad * 2 + gap
+    canvas_w = sum(img.width for _, img in sized) + pad * 2 + gap * (len(sized) - 1)
     temp_canvas = Image.new("RGB", (canvas_w, 10), color=(255, 255, 255))
     draw_temp = ImageDraw.Draw(temp_canvas)
 
-    title = "Original | Regenerated"
+    title = title_override or " | ".join(name for name, _ in sized)
     title_bbox = draw_temp.textbbox((0, 0), title, font=font)
     title_h = (title_bbox[3] - title_bbox[1]) + 10
 
@@ -257,8 +401,10 @@ def save_comparison_image(
     draw.text((pad, pad), title, fill=(0, 0, 0), font=font)
 
     y_img = pad + title_h
-    canvas.paste(orig, (pad, y_img))
-    canvas.paste(regen, (pad + orig.width + gap, y_img))
+    x = pad
+    for _, img in sized:
+        canvas.paste(img, (x, y_img))
+        x += img.width + gap
 
     y_caption = y_img + target_h + gap
     for i, line in enumerate(wrapped):
@@ -327,21 +473,46 @@ def main() -> None:
         vl_chat_processor, vl_gpt = load_checkpoint(ckpt, device=device, torch_dtype=torch_dtype)
         vl_gpt.gen_vision_model = vl_gpt.gen_vision_model.to(torch.float32)
 
-        ckpt_out_dir = Path(args.out_dir) / checkpoint_to_dirname(ckpt)
+        run_tag = args.run_tag or f"cfg{args.cfg:g}_t{args.temp:g}"
+        ckpt_out_dir = Path(args.out_dir) / f"{checkpoint_to_dirname(ckpt)}__{run_tag}"
         ckpt_out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Saving outputs to: {ckpt_out_dir}")
+
+        agg_enc_counts, agg_t2i_counts = [], []
+        agg_t2i_top1, agg_t2i_unique = [], []
+        agg_t2i_rowdup, agg_t2i_coldup = [], []
 
         for idx, s in enumerate(samples):
             orig_img = Image.open(s["image_path"]).convert("RGB")
             caption = s["caption"]
             t2i_prompt = build_t2i_prompt(vl_chat_processor, caption)
-            gen_imgs = generate_image(
+            gen_imgs, t2i_tokens = generate_image(
                 vl_gpt, vl_chat_processor, t2i_prompt,
                 parallel_size=1,
-                temperature=1,
-                cfg_weight=5,
+                temperature=args.temp,
+                cfg_weight=args.cfg,
             )
             gen_img_pil = Image.fromarray(gen_imgs[0])
+
+            enc_tokens = encode_image_to_tokens(vl_gpt, orig_img)
+            recon_img = decode_tokens_to_image(vl_gpt, enc_tokens)
+            codebook_size = int(vl_gpt.gen_vision_model.quantize.embedding.weight.shape[0])
+            s_enc = token_stats(enc_tokens, codebook_size=codebook_size)
+            s_t2i = token_stats(t2i_tokens, codebook_size=codebook_size)
+            sp_enc = spatial_periodicity(enc_tokens)
+            sp_t2i = spatial_periodicity(t2i_tokens)
+            print(f"  Token stats for sample {idx} (codebook={codebook_size}):")
+            print(format_stats("img-encode", s_enc))
+            print(format_stats("t2i-gen   ", s_t2i))
+            print(format_spatial("img-encode", sp_enc))
+            print(format_spatial("t2i-gen   ", sp_t2i))
+            print(f"  collapse verdict (t2i): {collapse_verdict(s_t2i)}")
+            agg_enc_counts.append(s_enc["counts"])
+            agg_t2i_counts.append(s_t2i["counts"])
+            agg_t2i_top1.append(s_t2i["top1_frac"])
+            agg_t2i_unique.append(s_t2i["unique"])
+            agg_t2i_rowdup.append(sp_t2i["row_dup_rate"])
+            agg_t2i_coldup.append(sp_t2i["col_dup_rate"])
 
             image_stem = Path(s["image_name"]).stem
             save_path = ckpt_out_dir / f"{idx:05d}_{image_stem}.png"
@@ -350,9 +521,26 @@ def main() -> None:
                 orig_img=orig_img,
                 regen_img=gen_img_pil,
                 caption=caption,
+                recon_img=recon_img,
+                title_override=f"Original | VQ Recon | T2I (cfg={args.cfg}, T={args.temp})",
             )
 
             print(f"[{idx + 1}/{len(samples)}] saved {save_path}")
+
+        if agg_t2i_counts:
+            stacked_enc = torch.stack(agg_enc_counts).sum(dim=0)
+            stacked_t2i = torch.stack(agg_t2i_counts).sum(dim=0)
+            enc_unique_total = int((stacked_enc > 0).sum())
+            t2i_unique_total = int((stacked_t2i > 0).sum())
+            cb = stacked_enc.numel()
+            print(f"\n=== Checkpoint summary ({len(samples)} samples) ===")
+            print(f"  codebook size: {cb}")
+            print(f"  unique tokens used across all samples — img-encode: {enc_unique_total}/{cb} ({enc_unique_total/cb*100:.2f}%)")
+            print(f"  unique tokens used across all samples — t2i-gen   : {t2i_unique_total}/{cb} ({t2i_unique_total/cb*100:.2f}%)")
+            print(f"  mean t2i top1 frac : {np.mean(agg_t2i_top1)*100:.2f}%  (>20% suggests collapse)")
+            print(f"  mean t2i unique/sample : {np.mean(agg_t2i_unique):.1f}/576")
+            print(f"  mean t2i row-dup rate  : {np.mean(agg_t2i_rowdup)*100:.2f}%  (high => horizontal tiling)")
+            print(f"  mean t2i col-dup rate  : {np.mean(agg_t2i_coldup)*100:.2f}%  (high => vertical tiling)")
 
             
 

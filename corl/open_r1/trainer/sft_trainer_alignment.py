@@ -37,6 +37,8 @@ from transformers import (
 from transformers.utils import is_peft_available
 from accelerate.utils import set_seed
 from PIL import Image
+import numpy as np
+from pathlib import Path
 import torchvision.transforms as T
 
 from trl.import_utils import is_deepspeed_available
@@ -51,12 +53,12 @@ if is_peft_available():
 from janus.models import VLChatProcessor
 
 VQ_TRANSFORM = T.Compose([
-    T.Resize((224, 224), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
+    T.Resize((384, 384), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
     T.ToTensor(),
     T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
 ])
 
-N_IMAGE_TOKENS = 196
+N_IMAGE_TOKENS = 576
 
 
 def fix_janus_text(out_caption):
@@ -68,6 +70,21 @@ def fix_janus_text(out_caption):
     out_caption = re.sub(r"\n\s*\n+", "\n", out_caption)
 
     return out_caption.strip()
+
+
+class T2IEvalCallback(TrainerCallback):
+    """Runs t2i generation on cached prompts every `freq` steps and saves PNGs."""
+
+    def __init__(self, trainer, freq: int):
+        self.trainer = trainer
+        self.freq = freq
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.freq <= 0 or state.global_step == 0:
+            return
+        if state.global_step % self.freq != 0:
+            return
+        self.trainer._run_t2i_eval(state.global_step)
 
 
 class SFTAlignmentTrainer(Trainer):
@@ -157,6 +174,12 @@ class SFTAlignmentTrainer(Trainer):
 
         self.max_prompt_length = task_args.max_prompt_length
         self.temperature = task_args.temperature
+        self.prompt_dropout_prob = getattr(task_args, "prompt_dropout_prob", 0.1)
+        self.eval_image_freq = getattr(task_args, "eval_image_freq", 100)
+        self.eval_image_num = getattr(task_args, "eval_image_num", 4)
+        self.eval_image_cfg = getattr(task_args, "eval_image_cfg", 5.0)
+        self.eval_image_temp = getattr(task_args, "eval_image_temp", 1.0)
+        self.eval_image_subdir = getattr(task_args, "eval_image_subdir", "eval_samples")
 
         super().__init__(
             model=model,
@@ -170,8 +193,12 @@ class SFTAlignmentTrainer(Trainer):
         )
 
         self._metrics = defaultdict(list)
+        self._eval_prompts_cached = None
         set_seed(args.seed, device_specific=True)
         self.model_accepts_loss_kwargs = False
+
+        if self.eval_image_freq > 0:
+            self.add_callback(T2IEvalCallback(self, freq=self.eval_image_freq))
 
 
     @staticmethod
@@ -356,33 +383,149 @@ class SFTAlignmentTrainer(Trainer):
 
         return generated_ids
 
+    def _cache_eval_prompts(self):
+        """Take the first `eval_image_num` training samples, run i2t once, cache
+        (caption, image_path) so eval renders the same images at every step."""
+        device = self.accelerator.device
+        k = min(self.eval_image_num, len(self.train_dataset))
+        rows = [self.train_dataset[i] for i in range(k)]
+        imgs = [Image.open(r["image"]).convert("RGB") for r in rows]
+        t2i_inputs = self.get_i2t_t2i_inputs(device=device, images=imgs)
+        # Reconstruct human-readable captions from the token ids (best-effort).
+        # We don't have them as strings, so use the tokenized prompt directly.
+        self._eval_prompts_cached = [
+            {
+                "image_path": rows[i]["image"],
+                "input_ids": t2i_inputs["input_ids"][i:i + 1].clone(),
+                "attention_mask": t2i_inputs["attention_mask"][i:i + 1].clone(),
+            }
+            for i in range(k)
+        ]
+
+    @torch.inference_mode()
+    def _generate_one_image(self, input_ids, attention_mask,
+                            img_size=384, patch_size=16, parallel_size=1):
+        """Single-image t2i generation with CFG. Mirrors evaluate_checkpoints.py."""
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        device = input_ids.device
+        N = N_IMAGE_TOKENS
+        pad_id = self.processing_class.pad_id
+        bos_id = self.processing_class.tokenizer.bos_token_id
+
+        # Build cond/uncond batch by duplicating and padding the uncond row.
+        L = input_ids.shape[1]
+        tokens = torch.zeros((parallel_size * 2, L), dtype=torch.long, device=device)
+        attn = torch.zeros((parallel_size * 2, L), dtype=attention_mask.dtype, device=device)
+        for i in range(parallel_size * 2):
+            tokens[i] = input_ids[0]
+            attn[i] = attention_mask[0]
+            if i % 2 != 0:
+                bos_positions = (tokens[i] == bos_id).nonzero(as_tuple=True)[0]
+                if len(bos_positions) > 0:
+                    bos_pos = bos_positions[0].item()
+                    tokens[i, bos_pos + 1:-1] = pad_id
+
+        inputs_embeds = unwrapped.language_model.get_input_embeddings()(tokens)
+        generated_tokens = torch.zeros((parallel_size, N), dtype=torch.long, device=device)
+        outputs = None
+        for i in range(N):
+            outputs = unwrapped.language_model.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attn,
+                use_cache=True,
+                past_key_values=outputs.past_key_values if i != 0 else None,
+            )
+            hidden = outputs.last_hidden_state[:, -1, :]
+            logits = unwrapped.gen_head(hidden)
+            logit_cond = logits[0::2, :]
+            logit_uncond = logits[1::2, :]
+            logits = logit_uncond + self.eval_image_cfg * (logit_cond - logit_uncond)
+            probs = F.softmax(logits.float() / max(self.eval_image_temp, 1e-6), dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            generated_tokens[:, i] = next_token
+
+            both = torch.stack([next_token, next_token], dim=1).view(-1)
+            inputs_embeds = unwrapped.prepare_gen_img_embeds(both).unsqueeze(1)
+            attn = torch.cat(
+                [attn, torch.ones(attn.shape[0], 1, dtype=attn.dtype, device=device)],
+                dim=1,
+            )
+
+        grid = img_size // patch_size
+        dec = unwrapped.gen_vision_model.decode_code(
+            generated_tokens.to(dtype=torch.int),
+            shape=[parallel_size, 8, grid, grid],
+        )
+        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+        return Image.fromarray(dec[0]), generated_tokens[0].cpu()
+
+    def _run_t2i_eval(self, step: int):
+        if self._eval_prompts_cached is None:
+            try:
+                self._cache_eval_prompts()
+            except Exception as e:
+                print(f"[T2IEvalCallback] failed to cache eval prompts: {e}")
+                return
+
+        out_dir = Path(self.args.output_dir) / self.eval_image_subdir / f"step_{step:06d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            for i, p in enumerate(self._eval_prompts_cached):
+                try:
+                    gen_img, gen_tokens = self._generate_one_image(
+                        p["input_ids"], p["attention_mask"],
+                    )
+                    orig_img = Image.open(p["image_path"]).convert("RGB")
+                    # Side-by-side save for quick visual comparison.
+                    h = 384
+                    orig_resized = orig_img.resize(
+                        (int(orig_img.width * h / orig_img.height), h),
+                        Image.Resampling.BICUBIC,
+                    )
+                    canvas = Image.new("RGB", (orig_resized.width + gen_img.width + 10, h), (255, 255, 255))
+                    canvas.paste(orig_resized, (0, 0))
+                    canvas.paste(gen_img, (orig_resized.width + 10, 0))
+                    canvas.save(out_dir / f"sample_{i:02d}.png")
+                    # Log basic token diversity to the trainer metrics.
+                    n_unique = int(torch.unique(gen_tokens).numel())
+                    self._metrics["eval_unique_tokens"].append(n_unique)
+                except Exception as e:
+                    print(f"[T2IEvalCallback] sample {i} failed: {e}")
+            print(f"[T2IEvalCallback] saved {len(self._eval_prompts_cached)} samples to {out_dir}")
+        finally:
+            if was_training:
+                self.model.train()
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         device = self.accelerator.device
         unwrapped = self.accelerator.unwrap_model(model)
 
-        # GT image -> VQ token ids (supervision targets).
+        # GT image -> VQ token ids (used both as teacher-forcing context AND CE targets).
         with torch.inference_mode():
             _, gt_ids, _ = self.get_image_gen_reps(
                 unwrapped, device=device, images=inputs["images"]
             )
 
-            # AR rollout under current weights -> student's own image-token context.
-            student_ids = self.ar_rollout_student_ids(
-                model, inputs["t2i_input_ids"], inputs["t2i_attention_mask"]
-            )
-
-        # Need a writable copy: tensors from inference_mode can't be used in a
-        # grad-enabled forward without cloning out of inference state.
-        student_ids = student_ids.clone()
+        # Out of inference_mode so the tensor can participate in a grad forward.
         gt_ids = gt_ids.clone()
 
-        # Student forward (grad on): text prompt + student's own AR ids as
-        # teacher-forcing context, read logits at the N image positions.
+        # Classifier-free-guidance training: with prob p, replace inner prompt tokens
+        # with pad_id so the model also learns the unconditional distribution.
+        t2i_input_ids = self._apply_prompt_dropout(inputs["t2i_input_ids"])
+
+        # Standard AR teacher forcing: prompt + GT image tokens as context.
+        # modeling_vlm.py forward (task="generation") returns N logits taken from
+        # hidden_states[:, -N-1:-1, :] — i.e., logits[i] predicts gt_ids[i] given
+        # (prompt, gt_ids[<i]). The position shift is handled inside the model.
         student_logits = model(
-            t2i_input_ids=inputs["t2i_input_ids"],
+            t2i_input_ids=t2i_input_ids,
             t2i_attention_mask=inputs["t2i_attention_mask"],
-            t2i_discrete_img_ids=student_ids,
-            t2i_logits_to_keep=student_ids.shape[1],
+            t2i_discrete_img_ids=gt_ids,
+            t2i_logits_to_keep=gt_ids.shape[1],
             task="generation",
         ).logits                                                                # [B, N, V_img]
 
@@ -394,12 +537,43 @@ class SFTAlignmentTrainer(Trainer):
         self._metrics["loss_ce"].append(loss.item())
         with torch.no_grad():
             pred = student_logits.argmax(dim=-1)
-            self._metrics["token_acc"].append((pred == gt_ids).float().mean().item())
-            self._metrics["rollout_gt_match"].append(
-                (student_ids == gt_ids).float().mean().item()
-            )
+            correct = (pred == gt_ids).float()                                  # [B, N]
+            self._metrics["token_acc"].append(correct.mean().item())
+            # Per-quartile accuracy: exposes prompt-vs-context reliance.
+            # q0 = positions w/ least context (model must use prompt).
+            # q3 = positions w/ most context (model can lean on neighbors).
+            q_size = N // 4
+            for q in range(4):
+                s, e = q * q_size, (q + 1) * q_size if q < 3 else N
+                self._metrics[f"token_acc_q{q}"].append(correct[:, s:e].mean().item())
 
         return loss
+
+    def _apply_prompt_dropout(self, t2i_input_ids):
+        """For ~p fraction of samples, replace prompt body with pad_id (keep BOS + BOI).
+
+        Mirrors the unconditional branch used by CFG in evaluate_checkpoints.py:104-105.
+        """
+        if not self.model.training or self.prompt_dropout_prob <= 0:
+            return t2i_input_ids
+        B = t2i_input_ids.shape[0]
+        drop_mask = torch.rand(B, device=t2i_input_ids.device) < self.prompt_dropout_prob
+        if not drop_mask.any():
+            return t2i_input_ids
+
+        pad_id = self.processing_class.pad_id
+        bos_id = self.processing_class.tokenizer.bos_token_id
+        out = t2i_input_ids.clone()
+        for b in range(B):
+            if not drop_mask[b]:
+                continue
+            bos_positions = (out[b] == bos_id).nonzero(as_tuple=True)[0]
+            if len(bos_positions) == 0:
+                continue
+            bos_pos = bos_positions[0].item()
+            # Keep BOS at bos_pos and BOI at -1; pad everything strictly between.
+            out[b, bos_pos + 1:-1] = pad_id
+        return out
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         step_start = time.perf_counter()

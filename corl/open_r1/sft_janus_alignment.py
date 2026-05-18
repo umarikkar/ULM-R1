@@ -150,6 +150,31 @@ class SFTScriptArguments(ScriptArguments):
         metadata={"help": "Weight applied to the LPIPS term: total_loss = loss_align + lpips_weight * loss_lpips."},
     )
 
+    prompt_dropout_prob: float = field(
+        default=0.1,
+        metadata={"help": "Probability of replacing prompt body with pad_id during training (CFG training)."},
+    )
+    eval_image_freq: int = field(
+        default=100,
+        metadata={"help": "Run t2i inference and save images every N optimizer steps. 0 disables."},
+    )
+    eval_image_num: int = field(
+        default=4,
+        metadata={"help": "Number of fixed eval prompts to render at each eval step."},
+    )
+    eval_image_cfg: float = field(
+        default=5.0,
+        metadata={"help": "CFG weight used during eval-time generation."},
+    )
+    eval_image_temp: float = field(
+        default=1.0,
+        metadata={"help": "Sampling temperature used during eval-time generation."},
+    )
+    eval_image_subdir: str = field(
+        default="eval_samples",
+        metadata={"help": "Subdirectory under output_dir to save eval-time generations."},
+    )
+
 
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()
