@@ -33,7 +33,13 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.configuration_utils import PretrainedConfig
+from dataclasses import dataclass
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+
+@dataclass
+class T2IOutputWithPast(CausalLMOutputWithPast):
+    text_proto_logits: Optional[torch.FloatTensor] = None
 from torch.nn import CrossEntropyLoss
 
 from janus.models.clip_encoder import CLIPVisionTower
@@ -228,10 +234,10 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         language_config = config.language_config
         self.language_model = LlamaForCausalLM(language_config)
 
-        # Learnable mask query token in the LLM input embedding space (used by SFT alignment trainer)
-        self.mask_token_embed = torch.nn.Parameter(
-            torch.zeros(1, 1, language_config.hidden_size)
-        )
+        # # Learnable mask query token in the LLM input embedding space (used by SFT alignment trainer)
+        # self.mask_token_embed = torch.nn.Parameter(
+        #     torch.zeros(1, 1, language_config.hidden_size)
+        # )
 
         self.post_init()
 
@@ -316,6 +322,16 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             t2i_discrete_img_ids = None,
             t2i_pixel_values: Optional[torch.FloatTensor] = None,
             t2i_logits_to_keep: Union[int, torch.Tensor] = 0,
+            # Optional [B, d] additive bias broadcast across every image-position
+            # embedding (added to t2i_img_embeds before LM forward). Used for
+            # unsupervised prototype conditioning; None disables.
+            t2i_img_pos_bias: Optional[torch.FloatTensor] = None,
+            # If True, run self.text_to_proto on the mean-pooled text-position
+            # hidden states and return its output as `text_proto_logits` on the
+            # output object. Calling the head INSIDE forward (rather than from
+            # the trainer) keeps DDP's reducer happy.
+            t2i_compute_text_to_proto: bool = False,
+            t2i_text_pool_mask: Optional[torch.Tensor] = None,
 
             task="understanding",
             labels=None,
@@ -338,22 +354,35 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             )
 
         elif task == "generation":
+
+            # print(torch.cuda.current_device(), t2i_discrete_img_ids.shape)
+
             if t2i_inputs_embeds is None:
                 t2i_inputs_embeds = self.language_model.get_input_embeddings()(t2i_input_ids)
 
-                if t2i_discrete_img_ids is None and t2i_pixel_values is not None:
-                    with torch.inference_mode():
-                        # all_labels
-                        t2i_discrete_img_ids = self.gen_vision_model.encode(
-                            t2i_pixel_values)[-1][-1]
-                        t2i_discrete_img_ids = t2i_discrete_img_ids.reshape(
-                            t2i_inputs_embeds.shape[0], -1)
+            if t2i_discrete_img_ids is None and t2i_pixel_values is not None:
+                with torch.inference_mode():
+                    # all_labels
+                    t2i_discrete_img_ids = self.gen_vision_model.encode(
+                        t2i_pixel_values)[-1][-1]
+                    t2i_discrete_img_ids = t2i_discrete_img_ids.reshape(
+                        t2i_inputs_embeds.shape[0], -1)
 
-                t2i_img_embeds = self.prepare_gen_img_embeds(t2i_discrete_img_ids)
-                t2i_img_mask = t2i_discrete_img_ids >= 0
+            # Append teacher-forcing image embeddings regardless of which input
+            # path the caller used (input_ids vs inputs_embeds). Previously this
+            # lived inside `if t2i_inputs_embeds is None`, so callers that built
+            # their own inputs_embeds (e.g. attribute conditioning) silently
+            # skipped teacher forcing and the slice below grabbed text logits.
+            t2i_img_embeds = self.prepare_gen_img_embeds(t2i_discrete_img_ids)
+            t2i_img_mask = t2i_discrete_img_ids >= 0
+            # Unsupervised prototype conditioning: add the [B, d] bias across all
+            # 576 image positions so the model sees a per-image style anchor at
+            # every output position, with no prepended tokens or RoPE shift.
+            if t2i_img_pos_bias is not None:
+                t2i_img_embeds = t2i_img_embeds + t2i_img_pos_bias.to(dtype=t2i_img_embeds.dtype).unsqueeze(1)
 
-                t2i_inputs_embeds = torch.cat([t2i_inputs_embeds, t2i_img_embeds], dim=1)
-                t2i_attention_mask = torch.cat([t2i_attention_mask, t2i_img_mask], dim=1)
+            t2i_inputs_embeds = torch.cat([t2i_inputs_embeds, t2i_img_embeds], dim=1)
+            t2i_attention_mask = torch.cat([t2i_attention_mask, t2i_img_mask], dim=1)
 
             outputs = self.language_model.model(
                 inputs_embeds=t2i_inputs_embeds,
@@ -363,20 +392,33 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             )
             hidden_states = outputs.last_hidden_state
 
-            # Shift by -1: to score img_k we need the hidden state at position P-1+k
-            # (the one whose next-token prediction is img_k), not position P+k.
             logits = self.gen_head(
                 hidden_states[:, -t2i_logits_to_keep - 1 : -1, :]
             ).contiguous()
 
-            return CausalLMOutputWithPast(
-                # loss=loss,
+            text_proto_logits = None
+            if t2i_compute_text_to_proto and hasattr(self, "text_to_proto"):
+                T = hidden_states.shape[1] - t2i_logits_to_keep
+                text_h = hidden_states[:, :T, :]
+                if t2i_text_pool_mask is not None:
+                    m = t2i_text_pool_mask[:, :T]
+                else:
+                    m = torch.ones(text_h.shape[:2], dtype=torch.long, device=text_h.device)
+                # Pool the LAST non-pad text position (= <image_start_tag> under
+                # our prompt template). Causal LM => this position has attended
+                # over the whole caption; it's the natural "now generate" summary.
+                last_idx = (m.sum(dim=1).long() - 1).clamp(min=0)
+                batch_idx = torch.arange(text_h.shape[0], device=text_h.device)
+                pooled = text_h[batch_idx, last_idx]
+                head_dtype = next(self.text_to_proto.parameters()).dtype
+                text_proto_logits = self.text_to_proto(pooled.to(dtype=head_dtype))
+
+            return T2IOutputWithPast(
                 logits=logits,
-                # logits=all_logits,
                 past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                # hidden_states=hidden_states,
+                hidden_states=hidden_states,
                 attentions=outputs.attentions,
+                text_proto_logits=text_proto_logits,
             )
 
         else:  # joint
@@ -398,19 +440,29 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
             if t2i_inputs_embeds is None:
                 t2i_inputs_embeds = self.language_model.get_input_embeddings()(t2i_input_ids)
 
-                if t2i_discrete_img_ids is None and t2i_pixel_values is not None:
-                    with torch.inference_mode():
-                        # all_labels
-                        t2i_discrete_img_ids = self.gen_vision_model.encode(
-                            t2i_pixel_values)[-1][-1]
-                        t2i_discrete_img_ids = t2i_discrete_img_ids.reshape(
-                            t2i_inputs_embeds.shape[0], -1)
+            if t2i_discrete_img_ids is None and t2i_pixel_values is not None:
+                with torch.inference_mode():
+                    # all_labels
+                    t2i_discrete_img_ids = self.gen_vision_model.encode(
+                        t2i_pixel_values)[-1][-1]
+                    t2i_discrete_img_ids = t2i_discrete_img_ids.reshape(
+                        t2i_inputs_embeds.shape[0], -1)
 
-                t2i_img_embeds = self.prepare_gen_img_embeds(t2i_discrete_img_ids)
-                t2i_img_mask = t2i_discrete_img_ids >= 0
+            # Append teacher-forcing image embeddings regardless of which input
+            # path the caller used (input_ids vs inputs_embeds). Previously this
+            # lived inside `if t2i_inputs_embeds is None`, so callers that built
+            # their own inputs_embeds (e.g. attribute conditioning) silently
+            # skipped teacher forcing and the slice below grabbed text logits.
+            t2i_img_embeds = self.prepare_gen_img_embeds(t2i_discrete_img_ids)
+            t2i_img_mask = t2i_discrete_img_ids >= 0
+            # Unsupervised prototype conditioning: add the [B, d] bias across all
+            # 576 image positions so the model sees a per-image style anchor at
+            # every output position, with no prepended tokens or RoPE shift.
+            if t2i_img_pos_bias is not None:
+                t2i_img_embeds = t2i_img_embeds + t2i_img_pos_bias.to(dtype=t2i_img_embeds.dtype).unsqueeze(1)
 
-                t2i_inputs_embeds = torch.cat([t2i_inputs_embeds, t2i_img_embeds], dim=1)
-                t2i_attention_mask = torch.cat([t2i_attention_mask, t2i_img_mask], dim=1)
+            t2i_inputs_embeds = torch.cat([t2i_inputs_embeds, t2i_img_embeds], dim=1)
+            t2i_attention_mask = torch.cat([t2i_attention_mask, t2i_img_mask], dim=1)
 
             outputs = self.language_model.model(
                 inputs_embeds=t2i_inputs_embeds,

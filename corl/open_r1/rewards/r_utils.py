@@ -412,4 +412,3 @@ def get_cosine_scaled_reward(
         return rewards
 
     return cosine_scaled_reward
-

@@ -26,8 +26,12 @@ DATA_DIR_DICT = {
     "ulws072": "/vol/research/fmodel_medical/people/umar/datasets/PubMedVision",
 }
 
+
+
 HOSTNAME = os.uname().nodename.split(".")[0]
 DATA_DIR = (DATA_DIR_DICT.get(HOSTNAME) if HOSTNAME in DATA_DIR_DICT.keys() else DEFAULT_DATA_DIR)
+
+# DATA_DIR = 'data/t2i_midlevel_llama.parquet'
 
 
 # Add project root to path
@@ -92,9 +96,13 @@ if __name__ == "__main__":
     # ---- Paths (edit these) ---- #
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
-    DATA_PATH = "./PubMedVision_Original_Caption.json" 
+
+
+    DATA_PATH = "./PubMedVision_CachedCaptions_K4.json" 
+    # DATA_PATH = "/vol/research/fmodel_medical/people/umar/MLMM/ULM-R1/data/t2i_midlevel_llama.parquet"
+
     SAVE_DIR = "./results/DEBUGGING"
-    SAVE_PATH = f"{SAVE_DIR}/AlignmentSFT_LPIPS"
+    SAVE_PATH = f"{SAVE_DIR}/AlignmentSFT_Stage2_LoRA"
 
     os.makedirs(SAVE_PATH, exist_ok=True)
 
@@ -112,6 +120,32 @@ if __name__ == "__main__":
         prompt_dropout_prob=0.1,
         eval_image_freq=5,
         eval_image_num=2,
+        # "self_distill": model captions its own image each step (current default).
+        # "original": use the real PubMed Original_Caption from the JSON row.
+        caption_source="original",
+        # caption_column="caption",
+        caption_column="cached_captions",
+        use_perceptual_loss=True,
+        perceptual_weight=0.5,
+        perceptual_warmup_steps=10,
+        perceptual_layers="3,6,9",
+        # Keep the sidecar so the is_grid=='multi' filter still applies (same
+        # training data as the labeled-attribute run). Conditioning *labels*
+        # from the sidecar are NOT used -- only the grid filter.
+        attribute_sidecar="data/attribute_sidecar.json",
+        exclude_ids_json="corl/eval/test_split.json",
+        cond_dropout_prob=0.1,
+        # Unsupervised prototype conditioning -- BiomedCLIP-feature K-means
+        # prototypes, soft-assigned per image, added to image-position embeds.
+        # Requires data/prototype_centroids.pt produced by
+        # build_prototype_centroids.sh.
+        use_prototype_conditioning=True,
+        prototype_centroids_path="data/prototype_centroids.pt",
+        cond_temperature=0.1,
+        # Text -> prototype head: bridges training (image features) and
+        # inference (caption only). Anneal cond from w_image -> w_text.detach().
+        use_text_to_proto=True,
+        text_to_proto_aux_weight=1.0,
     )
 
     # ---- Training arguments ---- #
@@ -132,13 +166,20 @@ if __name__ == "__main__":
         save_only_model=True,
     )
 
-    # ---- Model arguments ---- #
+    # ---- Model arguments (Stage 2: LoRA on the LLaMA backbone) ---- #
     model_args = ModelConfig(
         model_name_or_path=CKPT_PATH,
         torch_dtype="bfloat16",
+        use_peft=True,
+        lora_r=32,
+        lora_alpha=64,
+        lora_dropout=0.0,
+        # target_modules/modules_to_save are left None so the trainer fills in
+        # the LLaMA defaults + ["gen_head","gen_aligner"].
     )
 
-    main(script_args, training_args, model_args, max_samples=64)
+
+    main(script_args, training_args, model_args, max_samples=5000)
 
     # # Print memory every N seconds while debugging training.
     # monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))

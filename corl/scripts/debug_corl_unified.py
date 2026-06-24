@@ -14,17 +14,27 @@ from datetime import datetime
 
 
 
-import torch
-torch.backends.cudnn.enabled = False  # cuDNN 9.1.9 fails to initialize on this system
+# ---- Single GPU ---- #
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ["WANDB_DISABLED"] = "true"
 
-DEFAULT_IMAGE_BASE_DIR = "/projects/u6gd/datasets/PubMedVision/images"
-RETINA03_IMAGE_BASE_DIR = "/work/um00109/MLLM/datasets/PubMedVision/images"
-RETINA03_HOSTNAME = "cvssp-retina03"
-HOSTNAME = os.uname().nodename.split(".")[0]
-IMAGE_BASE_DIR = (
-    RETINA03_IMAGE_BASE_DIR if HOSTNAME == RETINA03_HOSTNAME else DEFAULT_IMAGE_BASE_DIR
-)
+import torch
+torch.backends.cudnn.enabled = False  # cuDNN 9.1.9 fails to initialize on this system
+
+# ---- Data location ---- #
+# Preferred path; if missing, fall back to HF cache dir so debug runs work anywhere.
+_PREFERRED_DATA_BASE_DIR = "/vol/research/fmodel_medical/MLMM/datasets"
+if os.path.isdir(_PREFERRED_DATA_BASE_DIR):
+    DATA_BASE_DIR = _PREFERRED_DATA_BASE_DIR
+else:
+    DATA_BASE_DIR = os.environ.get(
+        "HF_DATASETS_CACHE",
+        os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "datasets"),
+    )
+    os.makedirs(DATA_BASE_DIR, exist_ok=True)
+    print(f"[debug_corl_unified] '{_PREFERRED_DATA_BASE_DIR}' not found; using HF cache: {DATA_BASE_DIR}")
+
+IMAGE_BASE_DIR = os.path.join(DATA_BASE_DIR, "PubMedVision/images")
 
 # Add project root to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -85,44 +95,46 @@ def _start_memory_monitor(interval_sec: int = 20):
 
 
 if __name__ == "__main__":
-    # ---- Paths (edit these) ---- #
+    # ---- Paths (mirrors corl_unified.sh; edit as needed) ---- #
     CKPT_PATH = "deepseek-ai/Janus-Pro-1B"
     MODEL_CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoint")
-    DATA_PATH = "data/t2i_midlevel_llama.parquet"  # Can be a single parquet file or a directory containing multiple parquet files
-    SAVE_DIR = "./DEBUGGING"
+    # HF dataset id (resolves via HF cache); equivalent to sh's DATA_PATH=path/to/data/x2x_rft_22k
+    DATA_PATH = "mm-vl/x2x_rft_22k"
+    SAVE_DIR = "./results/DEBUGGING"
     SAVE_PATH = f"{SAVE_DIR}/RFT22k-CycleMatchAccFormat-UniReward-G4-beta004-bs16"
 
     os.makedirs(SAVE_PATH, exist_ok=True)
 
-    # ---- Script arguments ---- #
+    # ---- Script arguments (strict mirror of corl_unified.sh) ---- #
+    # sh: reward_funcs="t2i_bid_cycle_reward t2i_ti_sim qa_accuracy format"
+    # NOTE: GRPOScriptArguments in grpo_janus_unify.py does NOT have
+    # image_base_dir / lazy_image_loading fields — those belong to the medical
+    # variants (corl_unified_medical*.sh). Do not pass them here.
     script_args = GRPOScriptArguments(
         dataset_name=DATA_PATH,
-        model_ckpt_dir=MODEL_CKPT_DIR,
-        image_base_dir=IMAGE_BASE_DIR,
-        lazy_image_loading=True,
+        model_ckpt_dir=MODEL_CKPT_DIR,        # not consumed by grpo_janus_unify.main, kept for parity
         reward_funcs=[
             "t2i_bid_cycle_reward",
-            "t2i_match",
-            # "i2t_image_cycle_reward",
-            # "qa_accuracy",
-            # "format",
+            "t2i_ti_sim",
+            "qa_accuracy",
+            "format",
         ],
         task_format="unify",
         unify_advantage=False,
         unify_reward=True,
     )
 
-    # ---- Training arguments ---- #
+    # ---- Training arguments (strict mirror of corl_unified.sh) ---- #
     training_args = GRPOConfig(
         output_dir=SAVE_PATH,
-        report_to="none",
+        report_to="none",                    # sh: wandb -> disabled for debug
         logging_steps=1,
-        beta=0.0,
+        beta=0.0,                            # sh: beta=0.0
         max_prompt_length=1024,
-        max_completion_length=512,
-        num_generations=2,
+        max_completion_length=576,           # sh: 576
+        num_generations=4,                   # sh: num_generation=4
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=4,       # sh: 4
         num_train_epochs=1,
         learning_rate=4e-6,
         bf16=True,
@@ -132,18 +144,18 @@ if __name__ == "__main__":
         save_only_model=True,
     )
 
-    # ---- Model arguments ---- #
+    # ---- Model arguments (strict mirror of corl_unified.sh) ---- #
     model_args = ModelConfig(
         model_name_or_path=CKPT_PATH,
         torch_dtype="bfloat16",
     )
 
-    main(script_args, training_args, model_args, max_samples=1000)
+    main(script_args, training_args, model_args)
 
     # # Print memory every N seconds while debugging training.
     # monitor_interval = int(os.environ.get("DEBUG_MEM_INTERVAL", "20"))
     # mem_stop_event = _start_memory_monitor(interval_sec=monitor_interval)
     # try:
-    #     main(script_args, training_args, model_args, max_samples=1000)
+    #     main(script_args, training_args, model_args)
     # finally:
     #     mem_stop_event.set()

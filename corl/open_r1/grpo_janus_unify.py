@@ -13,18 +13,15 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-import os
-import time
 from typing import Optional
-from datasets import load_dataset, Image as HFImage
-from PIL import Image
+from datasets import load_dataset
 
 from transformers import TrainerCallback
 from trl import (
     GRPOConfig, ModelConfig, ScriptArguments,
     TrlParser, get_peft_config
 )
-from corl.open_r1.trainer.grpo_trainer_unified_noMM import JanusProUnifiedGRPOTrainer
+from corl.open_r1.trainer.grpo_trainer_unified import JanusProUnifiedGRPOTrainer
 from corl.open_r1.rewards import reward_funcs_registry
 
 
@@ -109,89 +106,26 @@ class GRPOScriptArguments(ScriptArguments):
         metadata={"help": "."},
     )
     model_ckpt_dir: str = field(
-        default="./checkpoint/"
+        default="XXX/checkpoint/"
     )
     blip_model_ckpt: str = field(
-        default="./checkpoint/blip-image-captioning-base"
+        default="XXX/checkpoint/blip-image-captioning-base"
     )
     dataset_cache_dir: str = field(
-        default=os.environ.get("HF_DATASETS_CACHE", None),
-    )
-    image_base_dir: str = field(
-        default="",
-        metadata={"help": "Base directory for image_path column in parquet datasets."},
-    )
-    lazy_image_loading: bool = field(
-        default=False,
-        metadata={"help": "If true, keep image paths only and decode images lazily in the trainer."},
-    )
-    max_samples: Optional[int] = field(
-        default=None,
-        metadata={"help": "Optional limit on samples per split for faster debugging runs."},
+        default="XXX/data/cache/"
     )
 
 
-def main(script_args, training_args, model_args, max_samples=None):
-    preprocess_start = time.perf_counter()
-    if script_args.dataset_name.endswith(".parquet") or os.path.isdir(script_args.dataset_name):
-        data_files = (
-            os.path.join(script_args.dataset_name, "*.parquet")
-            if os.path.isdir(script_args.dataset_name)
-            else script_args.dataset_name
-        )
-        dataset = load_dataset("parquet", data_files=data_files, cache_dir=script_args.dataset_cache_dir)
-    else:
-        dataset = load_dataset(
-            script_args.dataset_name,
-            name=script_args.dataset_config,
-            cache_dir=script_args.dataset_cache_dir,
-        )
+def main(script_args, training_args, model_args):
+    # Get reward functions
+    reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
 
-    # Drop QA-dependent rewards if dataset has no qa_type column
-    train_cols = dataset[script_args.dataset_train_split].column_names
-    requested_rewards = list(script_args.reward_funcs)
-    if "qa_type" not in train_cols and "qa_accuracy" in requested_rewards:
-        print("[reward] no 'qa_type' column in dataset — dropping 'qa_accuracy' reward")
-        requested_rewards = [r for r in requested_rewards if r != "qa_accuracy"]
-    reward_funcs = [reward_funcs_registry[func] for func in requested_rewards]
-
-    # Optionally limit dataset size for debugging
-    if max_samples is not None:
-        for split in dataset:
-            if len(dataset[split]) > max_samples:
-                dataset[split] = dataset[split].select(range(max_samples))
-
-    # Resolve image paths and filter out missing images
-    image_base_dir = script_args.image_base_dir
-
-    if "image_path" in dataset[script_args.dataset_train_split].column_names:
-        def resolve_image_path(example):
-            img_path = os.path.join(image_base_dir, example["image_path"]) if image_base_dir else example["image_path"]
-            example["image_full_path"] = img_path
-            return example
-
-        dataset = dataset.map(resolve_image_path)
-        # Filter out rows where the image file is missing
-        dataset = dataset.filter(lambda x: os.path.exists(x["image_full_path"]))
-
-        if script_args.lazy_image_loading:
-            print("[data] using lazy image loading (paths only; images decoded in trainer)")
-        else:
-            def load_image(example):
-                example["image"] = Image.open(example["image_full_path"]).convert("RGB")
-                return example
-
-            dataset = dataset.map(load_image)
-            print("[data] using eager image loading (decoded during preprocessing)")
-
-    elif "image" in dataset[script_args.dataset_train_split].column_names:
-        dataset = dataset.cast_column("image", HFImage())
-
-        def ensure_rgb(example):
-            example["image"] = example["image"].convert("RGB")
-            return example
-
-        dataset = dataset.map(ensure_rgb)
+    # Load the dataset
+    dataset = load_dataset(
+        script_args.dataset_name,
+        name=script_args.dataset_config,
+        cache_dir=script_args.dataset_cache_dir,
+    )
 
     # Format into conversation
     def make_conversation_t2i(example):
@@ -199,7 +133,8 @@ def main(script_args, training_args, model_args, max_samples=None):
             "prompt": [
                 {
                     "role": "<|User|>",
-                    "content": f"{example['detailed_caption'].strip()}",
+                    "content": f"{example['prompt'].strip()}",
+                    # "images": [example["image"]],
                 },
                 {"role": "<|Assistant|>", "content": ""},
             ],
@@ -220,6 +155,7 @@ def main(script_args, training_args, model_args, max_samples=None):
                 {
                     "role": "<|User|>",
                     "content": f"<image_placeholder>\n{question}",
+                    # "images": [example["image"]],
                 },
                 {"role": "<|Assistant|>", "content": ""},
             ],
@@ -230,18 +166,17 @@ def main(script_args, training_args, model_args, max_samples=None):
             "prompt": [
                 {
                     "role": "<|User|>",
-                    "content": f"{example['detailed_caption'].strip()}",
+                    "content": f"{example['prompt'].strip()}",
                 },
                 {"role": "<|Assistant|>", "content": ""},
             ],
             "qa_prompt": [
                 {
                     "role": "<|User|>",
-                    "content": f"<image_placeholder>\n{example['caption']}",
+                    "content": f"<image_placeholder>\n{example['qa_problem']}",
                 },
                 {"role": "<|Assistant|>", "content": ""},
-            ],
-            "qa_solution": example["caption"],
+            ]
         }
 
     if script_args.task_format == "t2i":
@@ -252,14 +187,11 @@ def main(script_args, training_args, model_args, max_samples=None):
     else:
         dataset = dataset.map(make_conversation_joint)
 
-    print(f"[timing] dataset preprocessing took {time.perf_counter() - preprocess_start:.2f}s")
-
     trainer_cls = JanusProUnifiedGRPOTrainer
 
     print("using: ", trainer_cls)
 
     # Initialize the GRPO trainer
-    train_start = time.perf_counter()
     trainer = trainer_cls(
         model=model_args.model_name_or_path,
         reward_funcs=reward_funcs,
@@ -273,7 +205,6 @@ def main(script_args, training_args, model_args, max_samples=None):
     )
 
     trainer.train()
-    print(f"[timing] trainer.train() took {time.perf_counter() - train_start:.2f}s")
 
     # Save and push to hub
     trainer.save_model(training_args.output_dir)
@@ -286,4 +217,4 @@ if __name__ == "__main__":
 
     script_args, training_args, model_args = parser.parse_args_and_config()
 
-    main(script_args, training_args, model_args, max_samples=script_args.max_samples)
+    main(script_args, training_args, model_args)
