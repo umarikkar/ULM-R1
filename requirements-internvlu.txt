@@ -1,0 +1,63 @@
+# ============================================================================
+# requirements-internvlu.txt
+# Recreate the `internvlu` env on Isambard-AI (ARM64 / aarch64, GH200).
+#
+# The source env is x86_64 (torch 2.6.0+cu124 x86 wheels) and CANNOT be copied
+# to ARM — conda-pack/rsync would carry x86_64 .so files that don't run on
+# aarch64. Recreate from this spec instead.
+#
+# Verified-working versions are taken from the x86 env where the InternVL-U
+# T2I trainer smoke-tested OK (transformers 4.52.3 / diffusers 0.35.1 /
+# accelerate 1.13.0 / trl 0.18.1 / peft 0.18.1 / datasets 3.2.0, py3.10).
+# ----------------------------------------------------------------------------
+# Step 1 — create the env at your Isambard destination prefix:
+#     conda create -p /projects/u6gd/umar/miniconda3/envs/internvlu python=3.10 -y
+#     conda activate /projects/u6gd/umar/miniconda3/envs/internvlu
+#
+# Step 2 — install everything:
+#     pip install -r requirements-internvlu.txt
+#
+# Step 3 — sanity check (must print: aarch64 | ... | True):
+#     python -c "import platform,torch;print(platform.machine(),'|',torch.__version__,'|',torch.cuda.is_available())"
+# ----------------------------------------------------------------------------
+# NOTES
+# * torch/torchvision are pulled from the PyTorch cu124 index below; on aarch64
+#   this resolves to the GH200 (sbsa) CUDA build. If the aarch64 +cu124 wheel
+#   is missing for 2.6.0, drop the two torch lines here and instead run:
+#       pip install torch==2.6.0 torchvision --index-url https://download.pytorch.org/whl/cu126
+#   then `pip install -r requirements-internvlu.txt`. (cu12x wheels bundle their
+#   own CUDA runtime; only a recent enough GPU driver is required.)
+# * flash_attn is intentionally OMITTED — it is not installed in the working x86
+#   env either (InternVL-U falls back to SDPA). Building it on ARM is a from-
+#   source compile; add it later only if you actually need it.
+# * `internvlu` is NOT a pip package: it's the sibling repo (clone it on
+#   Isambard and add to PYTHONPATH, or set INTERNVLU_REPO). The trainer also
+#   needs `corl` from this ULM-R1 repo on PYTHONPATH.
+# ============================================================================
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+# --- core DL stack (architecture-sensitive: must be aarch64 CUDA wheels) ---
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+
+# --- HuggingFace + diffusion stack (pinned to the verified-working env) ---
+transformers==4.52.3
+diffusers==0.35.1
+accelerate==1.13.0
+tokenizers
+safetensors
+huggingface-hub
+
+# --- training stack (added to the env to run the ULM-R1 trainer) ---
+trl==0.18.1
+peft==0.18.1
+datasets==3.2.0
+
+# --- InternVL-U + data/runtime deps ---
+timm
+einops
+pyarrow
+pillow
+sentencepiece
+numpy
