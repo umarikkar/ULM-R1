@@ -83,7 +83,15 @@ def build_state_mask(input_ids, attention_mask, generation_flags,
     branch) so the trainer is self-contained and matches inference exactly.
     """
     B, N = input_ids.shape
-    img_start_positions = (input_ids == img_start_token_id).nonzero()
+    # Use the LAST <img> token per row — some caption texts contain a literal
+    # <img> string (HTML artefacts in PubMed), producing >1 hit per row.
+    # The generation <img> is always appended last, so argmax on the reversed
+    # cumsum gives the correct position regardless of extras in the caption.
+    img_tok_mask = (input_ids == img_start_token_id)          # [B, N] bool
+    last_col = N - 1 - img_tok_mask.flip(dims=[1]).int().argmax(dim=1)  # [B]
+    img_start_positions = torch.stack(
+        [torch.arange(B, device=input_ids.device), last_col], dim=1
+    )  # [B, 2]
     gen_img_start_positions = img_start_positions[generation_flags.bool()]  # [K,2]
     state_positions_row = torch.arange(B, device=input_ids.device)[None]    # [1,B]
     state_positions_col = torch.arange(N, device=input_ids.device)[None]    # [1,N]

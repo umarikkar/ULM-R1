@@ -123,15 +123,19 @@ def _build_stage2_peft_config(model_args, script_args=None):
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()
 
-    dataset = load_dataset("parquet", data_files=script_args.dataset_name)
-    img_key = script_args.image_column
+    data_dir = script_args.data_dir
+
+    if 'PubMedVision' in script_args.dataset_name:
+        dataset = load_dataset("json", data_files=os.path.join(data_dir, script_args.dataset_name))
+        img_key = "image"
+    else:
+        dataset = load_dataset("parquet", data_files=script_args.dataset_name)
+        img_key = script_args.image_column
 
     if max_samples is not None:
         for split in dataset:
             if len(dataset[split]) > max_samples:
                 dataset[split] = dataset[split].select(range(max_samples))
-
-    data_dir = script_args.data_dir
 
     def resolve_image_path(example):
         rel = example[img_key]
