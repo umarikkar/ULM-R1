@@ -319,6 +319,15 @@ class SFTScriptArguments(ScriptArguments):
         default="Original_Caption",
         metadata={"help": "Column name to read when caption_source='original'."},
     )
+    caption_level: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Convenience selector for the granularity-leveled caption "
+                    "cache (build_caption_cache_levels.py). One of "
+                    "l1_meta/l1/l2/l3; when set, forces caption_source='original' "
+                    "and overrides caption_column with 'cached_captions_<level>'.",
+        },
+    )
 
 
 
@@ -361,6 +370,18 @@ def _build_stage2_peft_config(model_args, script_args=None):
 
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()
+
+    # Convenience: --caption_level {l1_meta,l1,l2,l3} picks the leveled cache
+    # column and switches to the 'original' (cached-caption) source.
+    if getattr(script_args, "caption_level", None):
+        lvl = script_args.caption_level
+        if lvl not in ("l1_meta", "l1", "l2", "l3"):
+            raise ValueError(
+                f"caption_level must be one of l1_meta/l1/l2/l3, got {lvl!r}"
+            )
+        script_args.caption_source = "original"
+        script_args.caption_column = f"cached_captions_{lvl}"
+        print(f"[caption_level] using column '{script_args.caption_column}'")
 
     if 'PubMedVision' in script_args.dataset_name:
         dataset = load_dataset("json", data_files=os.path.join(script_args.data_dir, script_args.dataset_name))
