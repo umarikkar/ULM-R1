@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sbatch corl/scripts/sft_internvlu_isambard.sbatch)",
+      "Bash(sbatch corl/scripts/sft_internvlu_original_captions.sbatch)",
+      "Bash(scancel 5408467)",
+      "Bash(srun --jobid=5412513 bash /lus/lfs1aip2/projects/u6gd/umar/codes/ULM-R1/corl/scripts/infer_internvlu_t2i.sh)",
+      "Bash(echo \"Inference PID: $!\")",
+      "Bash(python3 -c ' *)",
+      "Bash(find /projects/u6gd/datasets -name \"*PubMedVQA*\" -o -name \"*pubmedvqa*\" 2>/dev/null | head -20)",
+      "Read(//lus/lfs1aip2/projects/u6gd/datasets/**)",
+      "Bash(sleep 60 && ls -lh /projects/u6gd/umar/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/blobs/*.incomplete 2>/dev/null || echo \"no incomplete files \\(done or not started\\)\")",
+      "Read(//lus/lfs1aip2/projects/u6gd/umar/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/blobs/**)",
+      "Bash(scancel 5428036)"
+    ]
+  }
+}
