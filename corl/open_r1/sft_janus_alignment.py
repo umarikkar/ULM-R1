@@ -328,6 +328,25 @@ class SFTScriptArguments(ScriptArguments):
                     "and overrides caption_column with 'cached_captions_<level>'.",
         },
     )
+    caption_random_levels: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Random-granularity mode: comma-separated levels (e.g. "
+                    "'l1,l2,l3'). Each sample independently draws one of "
+                    "cached_captions_<lvl> per step. Forces caption_source="
+                    "'original' and takes precedence over caption_level.",
+        },
+    )
+    caption_epoch_schedule: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Curriculum mode: comma-separated levels applied per epoch "
+                    "(e.g. 'l2,l3' -> epoch 0 uses cached_captions_l2, epoch 1 "
+                    "uses cached_captions_l3; the last entry is reused for any "
+                    "further epochs). Forces caption_source='original'. Mutually "
+                    "exclusive with caption_random_levels.",
+        },
+    )
 
 
 
@@ -371,9 +390,28 @@ def _build_stage2_peft_config(model_args, script_args=None):
 def main(script_args, training_args, model_args, max_samples=None):
     preprocess_start = time.perf_counter()
 
+    # Random-granularity mode takes precedence: per-step random level per sample.
+    if getattr(script_args, "caption_random_levels", None):
+        levels = [l.strip() for l in script_args.caption_random_levels.split(",") if l.strip()]
+        bad = [l for l in levels if l not in ("l1_meta", "l1", "l2", "l3")]
+        if bad:
+            raise ValueError(f"caption_random_levels has invalid entries {bad}")
+        script_args.caption_source = "original"
+        # caption_column is a harmless fallback; the trainer randomizes per step.
+        script_args.caption_column = f"cached_captions_{levels[0]}"
+        print(f"[caption_random_levels] per-step random over {levels}")
+    # Curriculum mode: one level per epoch (trainer picks by int(state.epoch)).
+    elif getattr(script_args, "caption_epoch_schedule", None):
+        sched = [l.strip() for l in script_args.caption_epoch_schedule.split(",") if l.strip()]
+        bad = [l for l in sched if l not in ("l1_meta", "l1", "l2", "l3")]
+        if bad:
+            raise ValueError(f"caption_epoch_schedule has invalid entries {bad}")
+        script_args.caption_source = "original"
+        script_args.caption_column = f"cached_captions_{sched[0]}"  # fallback
+        print(f"[caption_epoch_schedule] per-epoch curriculum {sched}")
     # Convenience: --caption_level {l1_meta,l1,l2,l3} picks the leveled cache
     # column and switches to the 'original' (cached-caption) source.
-    if getattr(script_args, "caption_level", None):
+    elif getattr(script_args, "caption_level", None):
         lvl = script_args.caption_level
         if lvl not in ("l1_meta", "l1", "l2", "l3"):
             raise ValueError(
@@ -477,7 +515,8 @@ def main(script_args, training_args, model_args, max_samples=None):
         task_args=script_args,
     )
 
-    trainer.train()
+    resume_ckpt = getattr(training_args, "resume_from_checkpoint", None) or None
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     print(f"[timing] trainer.train() took {time.perf_counter() - train_start:.2f}s")
 
     # Save and push to hub

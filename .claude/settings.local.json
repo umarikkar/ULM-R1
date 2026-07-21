@@ -11,7 +11,19 @@
       "Read(//lus/lfs1aip2/projects/u6gd/datasets/**)",
       "Bash(sleep 60 && ls -lh /projects/u6gd/umar/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/blobs/*.incomplete 2>/dev/null || echo \"no incomplete files \\(done or not started\\)\")",
       "Read(//lus/lfs1aip2/projects/u6gd/umar/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/blobs/**)",
-      "Bash(scancel 5428036)"
+      "Bash(scancel 5428036)",
+      "Bash(echo \"=== alive? ===\")",
+      "Bash(pgrep -af sft_janus_alignment)",
+      "Bash(break)",
+      "Bash(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader)",
+      "Bash(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)",
+      "Read(//user/HS402/um00109/.cache/huggingface/**)",
+      "Read(//vol/research/fmodel_medical/people/umar/**)",
+      "WebSearch",
+      "Bash(nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader)",
+      "Bash(nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader)",
+      "Bash(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader)",
+      "Bash(rm -rf results/JanusPro-1B-Random results/JanusPro-1B-Random-3ep)"
     ]
   }
 }

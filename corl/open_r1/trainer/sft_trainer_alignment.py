@@ -285,6 +285,25 @@ class SFTAlignmentTrainer(Trainer):
         self.eval_image_subdir = getattr(task_args, "eval_image_subdir", "eval_samples")
         self.caption_source = getattr(task_args, "caption_source", "self_distill")
         self.caption_column = getattr(task_args, "caption_column", "Original_Caption")
+        # Random-granularity mode: draw one of these columns per sample per step.
+        self.caption_random_columns = None
+        _rand_levels = getattr(task_args, "caption_random_levels", None)
+        if _rand_levels:
+            self.caption_random_columns = [
+                f"cached_captions_{lvl.strip()}"
+                for lvl in _rand_levels.split(",") if lvl.strip()
+            ]
+            print(f"[caption_random] per-step random over {self.caption_random_columns}")
+        # Curriculum mode: one column per epoch, indexed by int(state.epoch).
+        self.caption_epoch_columns = None
+        _epoch_sched = getattr(task_args, "caption_epoch_schedule", None)
+        if _epoch_sched:
+            self.caption_epoch_columns = [
+                f"cached_captions_{lvl.strip()}"
+                for lvl in _epoch_sched.split(",") if lvl.strip()
+            ]
+            print(f"[caption_epoch] per-epoch curriculum {self.caption_epoch_columns}")
+
         self.use_perceptual_loss = getattr(task_args, "use_perceptual_loss", False)
         self.perceptual_weight = getattr(task_args, "perceptual_weight", 0.1)
         self.perceptual_model_id = getattr(
@@ -615,11 +634,14 @@ class SFTAlignmentTrainer(Trainer):
         rows = [self.train_dataset[i] for i in range(k)]
         imgs = [Image.open(r["image"]).convert("RGB") for r in rows]
         if self.caption_source == "original":
-            # For eval, always take captions[0] when the column is a list — keeps
-            # the per-step samples comparable across training steps.
+            # For eval, use a FIXED column (first random level if in random mode)
+            # and captions[0] when it's a list -- keeps the per-step samples
+            # comparable across training steps.
+            eval_col = (self.caption_random_columns[0]
+                        if self.caption_random_columns else self.caption_column)
             captions = []
             for r in rows:
-                c = r[self.caption_column]
+                c = r[eval_col]
                 captions.append(c[0] if isinstance(c, (list, tuple)) else c)
             t2i_inputs, _ = self.wrap_t2i_prompt(captions, device=device)
         else:
@@ -1127,12 +1149,25 @@ class SFTAlignmentTrainer(Trainer):
 
         if self.caption_source == "original":
             captions = []
+            if self.caption_epoch_columns:
+                _ep = int(getattr(self.state, "epoch", 0) or 0)
+                _epoch_col = self.caption_epoch_columns[min(_ep, len(self.caption_epoch_columns) - 1)]
+                if _epoch_col != getattr(self, "_last_epoch_col", None):
+                    print(f"[caption_epoch] epoch {_ep} -> {_epoch_col}", flush=True)
+                    self._last_epoch_col = _epoch_col
             for x in inputs:
-                cap = x.get(self.caption_column)
+                # random (per-sample) > per-epoch curriculum > fixed column.
+                if self.caption_random_columns:
+                    col = random.choice(self.caption_random_columns)
+                elif self.caption_epoch_columns:
+                    col = _epoch_col
+                else:
+                    col = self.caption_column
+                cap = x.get(col)
                 if cap is None:
                     raise KeyError(
                         f"caption_source='original' but column "
-                        f"'{self.caption_column}' is missing from the batch row. "
+                        f"'{col}' is missing from the batch row. "
                         f"Available keys: {list(x.keys())}"
                     )
                 # If the column holds K cached captions per image (e.g. from
