@@ -89,10 +89,71 @@ def collate(batch):
 
 
 def set_gran_scale(model, base_scaling, alpha):
+    """Legacy scalar-scale path (kept for save-time tidiness). Sets scaling[adp] =
+    base_scaling * alpha on every LoraLayer. Used only when per-sample stashing is off."""
     for name, m in model.named_modules():
         if isinstance(m, LoraLayer):
             for adp in m.scaling:
                 m.scaling[adp] = base_scaling[(name, adp)] * alpha
+
+
+# --------------------------------------------------------------------------- #
+# per-sample LoRA scaling: allows a batch of B samples with per-row alphas
+# to share one forward. Each LoraLayer's forward is monkey-patched to read
+# `self._per_sample_alpha` ([B_effective]) and broadcast it against the LoRA delta.
+# When _per_sample_alpha is None, layers fall back to vanilla scalar scaling.
+# --------------------------------------------------------------------------- #
+def install_persample_lora(model, base_scaling):
+    """Replace each LoraLayer.forward with a per-sample-aware version. Idempotent."""
+    for name, m in model.named_modules():
+        if not isinstance(m, LoraLayer):
+            continue
+        if getattr(m, "_persample_installed", False):
+            continue
+        # Freeze scalar scaling at its base (per-sample multiplier is what varies).
+        for adp in m.scaling:
+            m.scaling[adp] = base_scaling[(name, adp)]
+        _persample_forward_on(m)
+        m._persample_installed = True
+
+
+def _persample_forward_on(mod):
+    """Bind a new forward that multiplies each active-adapter LoRA delta by a
+    per-sample scale from mod._per_sample_alpha ([B]). Preserves DoRA fallback path
+    by delegating to base_layer when no active adapter matches."""
+    def forward(x, *args, **kwargs):
+        alpha = getattr(mod, "_per_sample_alpha", None)
+        result = mod.base_layer(x, *args, **kwargs)
+        for adp in mod.active_adapters:
+            if adp not in mod.lora_A:
+                continue
+            A = mod.lora_A[adp]; B = mod.lora_B[adp]
+            dropout = mod.lora_dropout[adp]
+            scaling = mod.scaling[adp]                # scalar base scale (alpha/r)
+            xin = x.to(A.weight.dtype)
+            delta = B(A(dropout(xin))).to(result.dtype)
+            if alpha is None:
+                result = result + delta * scaling
+            else:
+                per = alpha.to(delta.dtype)
+                for _ in range(delta.dim() - 1):
+                    per = per.unsqueeze(-1)           # [B] -> [B,1,...,1]
+                result = result + delta * (per * scaling)
+        return result
+    mod.forward = forward
+
+
+def set_persample_alpha(model, alpha_vec):
+    """Stash alpha_vec (shape [B_effective]) on every LoraLayer for the next forward."""
+    for m in model.modules():
+        if isinstance(m, LoraLayer):
+            m._per_sample_alpha = alpha_vec
+
+
+def clear_persample_alpha(model):
+    for m in model.modules():
+        if isinstance(m, LoraLayer):
+            m._per_sample_alpha = None
 
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +197,46 @@ def sample_group(janus, processor, img, device, *, k, max_new_tokens, temperatur
     return comps
 
 
+def _prompt_embeds_batch(janus, processor, imgs, device):
+    """B images -> ([B,P,H],[B,P]). Loops the single-image processor call (Janus'
+    vision encoder produces a fixed # image tokens per image, so prompt length P is
+    constant across images -> we can just torch.cat)."""
+    embs, attns = [], []
+    for img in imgs:
+        e, a = _prompt_embeds(janus, processor, img, device)   # [1,P,H],[1,P]
+        embs.append(e); attns.append(a)
+    return torch.cat(embs, 0), torch.cat(attns, 0)
+
+
+@torch.inference_mode()
+def sample_group_multi(janus, processor, imgs, alpha_vec, device, *, k, max_new_tokens,
+                       temperature, top_p, eos):
+    """B images -> B*K completions in ONE batched generate() call.
+
+    Batch layout is image-major: batch row i*K+j is (image i, rollout j). Per-sample
+    LoRA scale is stashed as alpha_vec.repeat_interleave(K) so each image's K rollouts
+    run at that image's alpha. Returns list-of-lists comps[i] = [len_ij, ...]."""
+    B = len(imgs)
+    emb, attn = _prompt_embeds_batch(janus, processor, imgs, device)    # [B,P,H],[B,P]
+    emb_bk = emb.repeat_interleave(k, dim=0)                            # [B*K,P,H]
+    attn_bk = attn.repeat_interleave(k, dim=0)
+    set_persample_alpha(janus, alpha_vec.repeat_interleave(k))          # [B*K]
+    out = janus.language_model.generate(
+        inputs_embeds=emb_bk, attention_mask=attn_bk,
+        max_new_tokens=max_new_tokens, do_sample=True,
+        temperature=temperature, top_p=top_p,
+        pad_token_id=eos, bos_token_id=processor.tokenizer.bos_token_id, eos_token_id=eos)
+    clear_persample_alpha(janus)
+    comps = [[] for _ in range(B)]
+    for r, row in enumerate(out):
+        i, j = divmod(r, k)
+        ids = row.tolist()
+        if eos in ids:
+            ids = ids[: ids.index(eos)]
+        comps[i].append(torch.tensor(ids, dtype=torch.long, device=device))
+    return comps
+
+
 def token_logprobs(janus, processor, img, comp_ids, device, *, requires_grad):
     """Per-token logprob of a completion under the CURRENTLY-set gran scale.
 
@@ -161,6 +262,76 @@ def token_logprobs(janus, processor, img, comp_ids, device, *, requires_grad):
         pred = logits[P - 1: P - 1 + L]                                    # [L,V]
         logp = F.log_softmax(pred.float(), dim=-1)
         return logp.gather(-1, comp_ids.unsqueeze(-1)).squeeze(-1)          # [L]
+
+
+def token_logprobs_batched_multi(janus, emb_all, attn_all, comps, pad_id, device, *, requires_grad):
+    """N (image, completion) rows in ONE batched forward.
+
+    emb_all: [N,P,H] and attn_all: [N,P] are prompt embeds already gathered/expanded
+    to match the completion order (caller responsible for lining these up with
+    per-sample LoRA scale). Returns list of per-row logprob tensors [L_n].
+    """
+    comps = [c.clone() for c in comps]
+    N = len(comps)
+    Ls = [c.shape[0] for c in comps]
+    Lmax = max(Ls)
+    ctx = torch.enable_grad() if requires_grad else torch.inference_mode()
+    with ctx:
+        P = emb_all.shape[1]
+        ids = torch.full((N, Lmax), pad_id, dtype=torch.long, device=device)
+        cmask = torch.zeros((N, Lmax), dtype=attn_all.dtype, device=device)
+        for n, c in enumerate(comps):
+            ids[n, :Ls[n]] = c
+            cmask[n, :Ls[n]] = 1
+        tok_emb = janus.language_model.get_input_embeddings()(ids)   # [N,Lmax,H]
+        full = torch.cat([emb_all, tok_emb], dim=1)                  # [N,P+Lmax,H]
+        am = torch.cat([attn_all, cmask], dim=1)                     # [N,P+Lmax]
+        pos = am.long().cumsum(-1) - 1
+        pos.masked_fill_(am == 0, 0)
+        logits = janus.language_model(inputs_embeds=full, attention_mask=am,
+                                      position_ids=pos).logits       # [N,P+Lmax,V]
+        pred = logits[:, P - 1: P - 1 + Lmax, :]
+        logp = F.log_softmax(pred.float(), dim=-1)
+        gathered = logp.gather(-1, ids.unsqueeze(-1)).squeeze(-1)    # [N,Lmax]
+        return [gathered[n, :Ls[n]] for n in range(N)]
+
+
+def token_logprobs_batched(janus, processor, img, comps, device, *, requires_grad):
+    """Batched version of token_logprobs: K completions for ONE image in a single forward.
+
+    Pads completions to max length; masks padding out of the attention mask so pad
+    tokens don't attend to anything downstream. Returns a list of per-completion
+    tensors of shape [L_k] (grad iff requires_grad); the tensors are views/slices of
+    a single batched forward, so summing losses over K gives ONE graph -> ONE backward.
+    """
+    comps = [c.clone() for c in comps]                                     # detach inference tensors
+    K = len(comps)
+    Ls = [c.shape[0] for c in comps]
+    Lmax = max(Ls)
+    ctx = torch.enable_grad() if requires_grad else torch.inference_mode()
+    with ctx:
+        emb, attn = _prompt_embeds(janus, processor, img, device)          # [1,P,H],[1,P]
+        P, H = emb.shape[1], emb.shape[2]
+        # pad completion ids to Lmax
+        pad_id = processor.tokenizer.pad_token_id or 0
+        ids = torch.full((K, Lmax), pad_id, dtype=torch.long, device=device)
+        cmask = torch.zeros((K, Lmax), dtype=attn.dtype, device=device)
+        for k, c in enumerate(comps):
+            ids[k, :Ls[k]] = c
+            cmask[k, :Ls[k]] = 1
+        tok_emb = janus.language_model.get_input_embeddings()(ids)         # [K,Lmax,H]
+        emb_k = emb.expand(K, -1, -1)                                      # [K,P,H]
+        attn_k = attn.expand(K, -1)                                        # [K,P]
+        full = torch.cat([emb_k, tok_emb], dim=1)                          # [K,P+Lmax,H]
+        am = torch.cat([attn_k, cmask], dim=1)                             # [K,P+Lmax]
+        pos = am.long().cumsum(-1) - 1
+        pos.masked_fill_(am == 0, 0)
+        logits = janus.language_model(inputs_embeds=full, attention_mask=am,
+                                      position_ids=pos).logits              # [K,P+Lmax,V]
+        pred = logits[:, P - 1: P - 1 + Lmax, :]                           # [K,Lmax,V]
+        logp = F.log_softmax(pred.float(), dim=-1)
+        gathered = logp.gather(-1, ids.unsqueeze(-1)).squeeze(-1)          # [K,Lmax]
+        return [gathered[k, :Ls[k]] for k in range(K)]
 
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +439,11 @@ def main():
         if isinstance(m, LoraLayer):
             for adp in m.scaling:
                 base_scaling[(name, adp)] = float(m.scaling[adp])
+    # Install per-sample LoRA scaling on every LoraLayer -> batches of images with
+    # different alphas share one forward. Caller stashes an [B_effective] tensor via
+    # set_persample_alpha(...) before each forward; clear_persample_alpha(...) after.
+    install_persample_lora(janus, base_scaling)
+    pad_id = processor.tokenizer.pad_token_id if processor.tokenizer.pad_token_id is not None else eos
     trainable = [p for p in janus.parameters() if p.requires_grad]
     if is_main:
         print(f"[model] fresh rank-{args.lora_r} gran-LoRA | trainable "
@@ -300,76 +476,102 @@ def main():
             logs = {"reward": [], "r_len": [], "r_rep": [], "len": [], "alpha": [],
                     "kl": [], "adv_abs": []}
             sample_caps = []
+            # --- 0. load all images in batch, sample per-image alphas ---
+            imgs, alphas = [], []
             for b in batch:
                 try:
-                    img = Image.open(b["path"]).convert("RGB")
+                    imgs.append(Image.open(b["path"]).convert("RGB"))
+                    alphas.append(torch.rand(1).item())
                 except Exception:
                     continue
-                alpha = torch.rand(1).item()          # sample alpha ~ U(0,1) per image
+            if not imgs:
+                continue
+            B = len(imgs)
+            alpha_vec = torch.tensor(alphas, device=device)                # [B]
+            K = args.group_size
 
-                # --- 1. rollout: K samples at scale=alpha (no grad) ---
-                _set_gc(False)                        # gc corrupts generation -> off
-                set_gran_scale(janus, base_scaling, alpha)
-                comps = sample_group(janus, processor, img, device,
-                                     k=args.group_size, max_new_tokens=args.max_new_tokens,
-                                     temperature=args.temperature, top_p=args.top_p, eos=eos)
-                if all(c.numel() == 0 for c in comps):
-                    continue
+            # --- 1. rollout: B*K completions in ONE batched generate() ---
+            _set_gc(False)                                                 # gc corrupts generation
+            comps_per_img = sample_group_multi(
+                janus, processor, imgs, alpha_vec, device,
+                k=K, max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature, top_p=args.top_p, eos=eos)
 
-                # --- 2. reward each completion ---
+            # --- 2. rewards + within-image GRPO advantage ---
+            adv_per_img, rewards_per_img, infos_per_img, texts_per_img = [], [], [], []
+            for i in range(B):
                 rewards, infos, texts = [], [], []
-                for c in comps:
+                for c in comps_per_img[i]:
                     text = processor.tokenizer.decode(c.tolist(), skip_special_tokens=True)
                     text = text.replace("Ġ", " ").replace("Ċ", "\n").strip()
-                    tot, info = R.reward(text, alpha, c.numel(), w_rep=args.w_rep,
+                    tot, info = R.reward(text, alphas[i], c.numel(), w_rep=args.w_rep,
                                          l_verbose=args.l_verbose, l_concise=args.l_concise)
                     rewards.append(tot); infos.append(info); texts.append(text)
                 rw = torch.tensor(rewards, device=device)
-
-                # --- 3. GRPO advantage within the group (mean-only baseline) ---
-                adv = rw - rw.mean()
+                a = rw - rw.mean()
                 if args.std_norm:
-                    adv = adv / (rw.std() + 1e-4)
+                    a = a / (rw.std() + 1e-4)
+                adv_per_img.append(a); rewards_per_img.append(rewards)
+                infos_per_img.append(infos); texts_per_img.append(texts)
 
-                # --- 4. reference logprobs at scale 0 (= base, no grad) ---
-                ref_lp = []
-                set_gran_scale(janus, base_scaling, 0.0)
-                for c in comps:
-                    if c.numel() == 0:
-                        ref_lp.append(None); continue
-                    ref_lp.append(token_logprobs(janus, processor, img, c, device,
-                                                 requires_grad=False).detach())
-
-                # --- 5. policy logprobs at scale=alpha (grad) -> PG + KL loss ---
-                # backward per-completion (only one graph alive at a time -> bounded
-                # memory on 24GB); grads accumulate. denom = #non-empty * #images.
-                n_used = sum(1 for c in comps if c.numel() > 0)
-                if n_used == 0:
-                    continue
-                denom = n_used * len(batch)
-                _set_gc(True)                         # gc on only for the grad forward
-                set_gran_scale(janus, base_scaling, alpha)
-                kl_acc = 0.0
-                for c, a_i, rlp in zip(comps, adv, ref_lp):
+            # --- 3. flatten to (image_idx, completion) rows, keeping non-empty only ---
+            flat_img_idx, flat_comps, flat_adv, flat_alpha = [], [], [], []
+            for i in range(B):
+                for k, c in enumerate(comps_per_img[i]):
                     if c.numel() == 0:
                         continue
-                    lp = token_logprobs(janus, processor, img, c, device, requires_grad=True)  # [L]
-                    # k3 KL estimator per token (>=0), ref is scale-0 base:
-                    diff = rlp - lp
-                    kl = (torch.exp(diff) - diff - 1.0)                    # [L]
-                    pg = -a_i * lp                                         # [L]
-                    tok_loss = (pg + args.beta_kl * kl).mean() / denom     # per-token mean
-                    tok_loss.backward()
-                    kl_acc += float(kl.mean().detach())
+                    flat_img_idx.append(i)
+                    flat_comps.append(c)
+                    flat_adv.append(float(adv_per_img[i][k]))
+                    flat_alpha.append(alphas[i])
+            N = len(flat_comps)
+            if N == 0:
+                continue
+            idx_t = torch.tensor(flat_img_idx, device=device, dtype=torch.long)
+            adv_t = torch.tensor(flat_adv, device=device)
+            alpha_t = torch.tensor(flat_alpha, device=device)
 
-                logs["reward"] += rewards
-                logs["r_len"] += [i["r_len"] for i in infos]
-                logs["r_rep"] += [i["r_rep"] for i in infos]
-                logs["len"] += [i["len_tok"] for i in infos]
-                logs["alpha"].append(alpha)
-                logs["kl"].append(kl_acc / n_used)
-                logs["adv_abs"].append(float(adv.abs().mean()))
-                sample_caps.append((alpha, texts[0]))
+            # per-image prompt embeds once, then expand to N rows via idx_t.
+            # Use no_grad (not inference_mode) so the tensors can also feed the grad
+            # forward below; no LoRA/trainable params live on the prompt path so we
+            # never need to backprop through it.
+            with torch.no_grad():
+                emb_img, attn_img = _prompt_embeds_batch(janus, processor, imgs, device)  # [B,P,H],[B,P]
+            emb_N = emb_img[idx_t]                                          # [N,P,H]
+            attn_N = attn_img[idx_t]                                        # [N,P]
+
+            # --- 4. reference logprobs at scale 0 (base), BATCHED over N ---
+            set_persample_alpha(janus, torch.zeros(N, device=device))
+            ref_lps = [lp.detach() for lp in token_logprobs_batched_multi(
+                janus, emb_N, attn_N, flat_comps, pad_id, device, requires_grad=False)]
+            clear_persample_alpha(janus)
+
+            # --- 5. policy logprobs at per-image alpha, BATCHED over N ---
+            denom = N                                                       # per-token mean, averaged over N
+            _set_gc(True)
+            set_persample_alpha(janus, alpha_t)
+            pol_lps = token_logprobs_batched_multi(
+                janus, emb_N, attn_N, flat_comps, pad_id, device, requires_grad=True)
+            per_comp_losses = []
+            kl_acc = 0.0
+            for lp, rlp, a_i in zip(pol_lps, ref_lps, adv_t):
+                diff = rlp - lp
+                kl = (torch.exp(diff) - diff - 1.0)                         # [L]
+                pg = -a_i * lp                                              # [L]
+                per_comp_losses.append((pg + args.beta_kl * kl).mean() / denom)
+                kl_acc += float(kl.mean().detach())
+            torch.stack(per_comp_losses).sum().backward()
+            clear_persample_alpha(janus)
+
+            for i in range(B):
+                logs["reward"] += rewards_per_img[i]
+                logs["r_len"] += [x["r_len"] for x in infos_per_img[i]]
+                logs["r_rep"] += [x["r_rep"] for x in infos_per_img[i]]
+                logs["len"]   += [x["len_tok"] for x in infos_per_img[i]]
+                logs["alpha"].append(alphas[i])
+                logs["adv_abs"].append(float(adv_per_img[i].abs().mean()))
+                sample_caps.append((alphas[i], texts_per_img[i][0]))
+            logs["kl"].append(kl_acc / max(1, N))
 
             # manual gradient all-reduce (we do multiple backwards + generation, so
             # we don't use DDP's forward wrapper; average lora grads across ranks).

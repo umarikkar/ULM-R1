@@ -16,14 +16,17 @@
 #   sbatch --export=ALL,MAX_STEPS=1000 corl/scripts/rl_gran_lora.sbatch
 #   sbatch --export=ALL,GROUP_SIZE=8,IMAGES_PER_STEP=4,BETA_KL=0.02 corl/scripts/rl_gran_lora.sbatch
 #
-# ALWAYS cap MAX_STEPS: a full epoch is ~636k images and RL rollouts are slow.
+# Defaults now target 1 full epoch (~39,443 steps at K=8, IPS=4 across 4 GPUs).
+# RL rollouts are slow — bump --time above if a full epoch won't fit in 12h,
+# or override MAX_STEPS at submit time to cap the run.
 set -eo pipefail
 
 export NPROC=${NPROC:-4}                      # must match --gpus above
 export GROUP_SIZE=${GROUP_SIZE:-8}            # K completions per image
 export IMAGES_PER_STEP=${IMAGES_PER_STEP:-4}  # grad-accum images per GPU
-export MAX_STEPS=${MAX_STEPS:-1000}
-export SAVE_STEPS=${SAVE_STEPS:-250}
+export EPOCHS=${EPOCHS:-1}
+export MAX_STEPS=${MAX_STEPS:--1}             # -1 = no cap, honour EPOCHS
+export SAVE_STEPS=${SAVE_STEPS:-2000}
 
 REPO=/projects/u6gd/umar/codes/ULM-R1
 mkdir -p "$REPO/corl/scripts/logs"

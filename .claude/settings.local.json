@@ -23,7 +23,18 @@
       "Bash(nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader)",
       "Bash(nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader)",
       "Bash(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader)",
-      "Bash(rm -rf results/JanusPro-1B-Random results/JanusPro-1B-Random-3ep)"
+      "Bash(rm -rf results/JanusPro-1B-Random results/JanusPro-1B-Random-3ep)",
+      "Bash(sinfo -o \"%P %D %N %G %t %C\")",
+      "Bash(sinfo -h -o \"%t %D\")",
+      "Bash(awk '{a[$1]+=$2} END {for \\(s in a\\) print s, a[s]}')",
+      "Bash(sinfo -h -N -o \"%N %t %C %G\" -t mix,idle)",
+      "Bash(awk '{split\\($3,c,\"/\"\\); if \\(c[2]+0>0\\) print}')",
+      "Bash(sinfo -h -N -o \"%N %t %C\" -t mix)",
+      "Bash(awk '{split\\($3,c,\"/\"\\); cpu_alloc=c[1]; cpu_idle=c[2]; cpu_tot=c[4]; gpus_used=int\\(cpu_alloc/72+0.5\\); gpus_free=4-gpus_used; if \\(gpus_free>0\\) {free_total+=gpus_free; nodes++}} END {print \"Approx free GPUs on mix nodes:\", free_total, \"across\", nodes, \"nodes\"}')",
+      "Bash(ls -la /projects/u6gd/umar/env.sh /projects/u6gd/umar/codes/ULM-R1/env.sh 2>&1)",
+      "Read(//lus/lfs1aip2/projects/u6gd/umar/**)",
+      "Bash(squeue -h -j 5743209 -o \"%t\")",
+      "Bash(salloc --nodes=1 --ntasks=1 --gpus=4 --cpus-per-task=16 --time=01:00:00 --job-name=gran_rl_smoke --no-shell)"
     ]
   }
 }
