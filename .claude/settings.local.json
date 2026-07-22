@@ -24,6 +24,7 @@
       "Bash(nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader)",
       "Bash(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader)",
       "Bash(rm -rf results/JanusPro-1B-Random results/JanusPro-1B-Random-3ep)",
+<<<<<<< Updated upstream
       "Bash(sinfo -o \"%P %D %N %G %t %C\")",
       "Bash(sinfo -h -o \"%t %D\")",
       "Bash(awk '{a[$1]+=$2} END {for \\(s in a\\) print s, a[s]}')",
@@ -35,6 +36,10 @@
       "Read(//lus/lfs1aip2/projects/u6gd/umar/**)",
       "Bash(squeue -h -j 5743209 -o \"%t\")",
       "Bash(salloc --nodes=1 --ntasks=1 --gpus=4 --cpus-per-task=16 --time=01:00:00 --job-name=gran_rl_smoke --no-shell)"
+=======
+      "Bash(nohup bash /tmp/claude-310829/-vol-research-fmodel-medical-people-umar-MLMM-ULM-R1/ada616eb-4db3-4bda-be38-436707f6c665/scratchpad/run_fid_inception.sh)",
+      "Bash(echo \"pid $!\")"
+>>>>>>> Stashed changes
     ]
   }
 }

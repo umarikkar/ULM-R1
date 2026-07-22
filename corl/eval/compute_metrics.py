@@ -120,6 +120,9 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--caption_field", default="Original_Caption")
     ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--no_fid", action="store_true",
+                    help="Skip the BiomedCLIP-feature FID (use the standard "
+                         "Inception FID from compute_fid_inception.py instead).")
     args = ap.parse_args()
 
     # Merge per-shard manifests.
@@ -162,19 +165,24 @@ def main():
         clipscore_gen = (gen_n * txt_n).sum(dim=-1).mean().item()
         clipscore_gt = (gt_n * txt_n).sum(dim=-1).mean().item()
         i2i_cos = (gen_n * gt_n).sum(dim=-1).mean().item()
-        fid = compute_fid(feats_gen, feats_gt)
 
-        results["per_modality"][mod] = {
+        cell = {
             "n": len(mrows),
-            "fid_biomedclip": fid,
             "clipscore_gen": clipscore_gen,
             "clipscore_gt_upper_bound": clipscore_gt,
             "i2i_cosine": i2i_cos,
         }
-        for k, v in (("fid_biomedclip", fid), ("clipscore_gen", clipscore_gen),
-                     ("clipscore_gt_upper_bound", clipscore_gt), ("i2i_cosine", i2i_cos)):
+        pairs = [("clipscore_gen", clipscore_gen),
+                 ("clipscore_gt_upper_bound", clipscore_gt), ("i2i_cosine", i2i_cos)]
+        if not args.no_fid:
+            fid = compute_fid(feats_gen, feats_gt)
+            cell["fid_biomedclip"] = fid
+            pairs.insert(0, ("fid_biomedclip", fid))
+        results["per_modality"][mod] = cell
+        for k, v in pairs:
             macro[k].append(v)
-        print(f"[metrics]   FID={fid:.2f}  CLIPScore-gen={clipscore_gen:.4f}  "
+        fid_str = f"FID={cell['fid_biomedclip']:.2f}  " if not args.no_fid else ""
+        print(f"[metrics]   {fid_str}CLIPScore-gen={clipscore_gen:.4f}  "
               f"CLIPScore-gt={clipscore_gt:.4f}  i2i={i2i_cos:.4f}")
 
     results["macro"] = {k: float(np.mean(v)) for k, v in macro.items()}
