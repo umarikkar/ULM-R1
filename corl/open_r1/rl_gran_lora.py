@@ -288,9 +288,14 @@ def token_logprobs_batched_multi(janus, emb_all, attn_all, comps, pad_id, device
         am = torch.cat([attn_all, cmask], dim=1)                     # [N,P+Lmax]
         pos = am.long().cumsum(-1) - 1
         pos.masked_fill_(am == 0, 0)
+        # logits_to_keep=Lmax+1 -> HF only projects the last Lmax+1 positions,
+        # saving huge memory (V=102400). The last Lmax+1 hidden states are at
+        # positions [P-1 .. P+Lmax-1]; drop the final one and we have exactly the
+        # Lmax completion prediction slots (positions [P-1 .. P+Lmax-2]).
         logits = janus.language_model(inputs_embeds=full, attention_mask=am,
-                                      position_ids=pos).logits       # [N,P+Lmax,V]
-        pred = logits[:, P - 1: P - 1 + Lmax, :]
+                                      position_ids=pos,
+                                      logits_to_keep=Lmax + 1).logits  # [N,Lmax+1,V]
+        pred = logits[:, :-1, :]                                       # [N,Lmax,V]
         logp = F.log_softmax(pred.float(), dim=-1)
         gathered = logp.gather(-1, ids.unsqueeze(-1)).squeeze(-1)    # [N,Lmax]
         return [gathered[n, :Ls[n]] for n in range(N)]

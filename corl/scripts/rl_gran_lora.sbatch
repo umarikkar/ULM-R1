@@ -27,6 +27,7 @@ export IMAGES_PER_STEP=${IMAGES_PER_STEP:-4}  # grad-accum images per GPU
 export EPOCHS=${EPOCHS:-1}
 export MAX_STEPS=${MAX_STEPS:--1}             # -1 = no cap, honour EPOCHS
 export SAVE_STEPS=${SAVE_STEPS:-2000}
+export GRAD_CKPT=${GRAD_CKPT:-1}              # required: batched B*K forward OOMs without it on 96GB
 
 REPO=/projects/u6gd/umar/codes/ULM-R1
 mkdir -p "$REPO/corl/scripts/logs"
