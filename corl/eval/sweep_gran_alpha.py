@@ -48,6 +48,9 @@ def main():
     ap.add_argument("--data_dir", required=True)
     ap.add_argument("--alphas", default="0,0.2,0.4,0.6,0.8,1.0")
     ap.add_argument("--per_modality", type=int, default=2)
+    ap.add_argument("--gen_batch", type=int, default=8,
+                    help="images generated per forward; keeps memory bounded so "
+                         "per_modality can be large on a shared GPU.")
     ap.add_argument("--max_new_tokens", type=int, default=160)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -83,20 +86,24 @@ def main():
 
     def caption_all(alpha):
         set_scale(model, base, alpha)
-        convs = [[{"role": "<|User|>", "content": f"<image_placeholder>\n{NEUTRAL_PROMPT}"},
-                  {"role": "<|Assistant|>", "content": ""}] for _ in imgs]
-        prep = processor(conversations=convs, images=[[i] for i in imgs],
-                         force_batchify=True).to(device)
-        with torch.inference_mode():
-            emb = model.prepare_inputs_embeds(
-                input_ids=prep.input_ids, pixel_values=prep.pixel_values,
-                images_seq_mask=prep.images_seq_mask, images_emb_mask=prep.images_emb_mask)
-            out = model.language_model.generate(
-                inputs_embeds=emb, attention_mask=prep.attention_mask,
-                max_new_tokens=args.max_new_tokens, do_sample=False,
-                pad_token_id=eos, bos_token_id=processor.tokenizer.bos_token_id,
-                eos_token_id=eos)
-        return [_fix(d) for d in processor.tokenizer.batch_decode(out, skip_special_tokens=True)]
+        caps = []
+        for i in range(0, len(imgs), args.gen_batch):
+            chunk = imgs[i:i + args.gen_batch]
+            convs = [[{"role": "<|User|>", "content": f"<image_placeholder>\n{NEUTRAL_PROMPT}"},
+                      {"role": "<|Assistant|>", "content": ""}] for _ in chunk]
+            prep = processor(conversations=convs, images=[[im] for im in chunk],
+                             force_batchify=True).to(device)
+            with torch.inference_mode():
+                emb = model.prepare_inputs_embeds(
+                    input_ids=prep.input_ids, pixel_values=prep.pixel_values,
+                    images_seq_mask=prep.images_seq_mask, images_emb_mask=prep.images_emb_mask)
+                out = model.language_model.generate(
+                    inputs_embeds=emb, attention_mask=prep.attention_mask,
+                    max_new_tokens=args.max_new_tokens, do_sample=False,
+                    pad_token_id=eos, bos_token_id=processor.tokenizer.bos_token_id,
+                    eos_token_id=eos)
+            caps += [_fix(d) for d in processor.tokenizer.batch_decode(out, skip_special_tokens=True)]
+        return caps
 
     report = {"alphas": alphas, "per_alpha": {}}
     print(f"{'alpha':>6} {'mean_words':>10} {'mean_chars':>10}")

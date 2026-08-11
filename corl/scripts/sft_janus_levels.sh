@@ -21,7 +21,11 @@ set -eo pipefail
 LEVEL=${LEVEL:-l1}
 RANDOM_LEVELS=${RANDOM_LEVELS:-}
 EPOCH_SCHEDULE=${EPOCH_SCHEDULE:-}      # curriculum: per-epoch levels e.g. "l2,l3"
-if [ -n "${RANDOM_LEVELS}" ]; then
+CAPTION_COLUMN=${CAPTION_COLUMN:-}      # arbitrary cached column, e.g. distilled random-alpha captions
+if [ -n "${CAPTION_COLUMN}" ]; then
+    CAP_ARG="--caption_source original --caption_column ${CAPTION_COLUMN}"
+    TAG="col_${CAPTION_COLUMN}"
+elif [ -n "${RANDOM_LEVELS}" ]; then
     CAP_ARG="--caption_random_levels ${RANDOM_LEVELS}"
     TAG="random_${RANDOM_LEVELS//,/-}"
 elif [ -n "${EPOCH_SCHEDULE}" ]; then
