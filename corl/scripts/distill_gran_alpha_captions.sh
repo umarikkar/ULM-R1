@@ -68,16 +68,22 @@ fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
 [ "$fail" = 1 ] && { echo "[distill] a shard FAILED (see logs/distill_shard*.log)"; exit 1; }
 
-# merge shards
+# merge shards (single-shard writes OUT directly; nothing to merge)
+if [ "$NSHARDS" -gt 1 ]; then
 python - "$OUT" "$NSHARDS" <<'PY'
-import json, sys
+import json, os, sys
 out, ns = sys.argv[1], int(sys.argv[2])
 rows = []
 for i in range(ns):
     f = out.replace(".json", f".shard{i}.json")
     rows += json.load(open(f))
 json.dump(rows, open(out, "w"), ensure_ascii=False)
+for i in range(ns):
+    os.remove(out.replace(".json", f".shard{i}.json"))
 print(f"[distill] merged {ns} shards -> {out}  ({len(rows)} rows)")
 PY
+else
+    echo "[distill] single shard -> $OUT"
+fi
 echo "[distill] DONE -> $OUT"
 echo "Stage 2:  CAPTION_COLUMN=cached_captions_randalpha DATASET_NAME=$OUT_NAME NUM_EPOCHS=1 bash corl/scripts/sft_janus_levels.sh"
